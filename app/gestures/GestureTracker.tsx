@@ -30,6 +30,14 @@ interface GestureCombo {
   timestamp: number;
 }
 
+interface MenuItem {
+  name: string;
+  icon: string;
+  startAngle: number;
+  endAngle: number;
+  color: string;
+}
+
 export default function GestureTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -37,6 +45,27 @@ export default function GestureTracker() {
   const [error, setError] = useState<string | null>(null);
   const [hands, setHands] = useState<HandData[]>([]);
   const [gestureCombos, setGestureCombos] = useState<GestureCombo[]>([]);
+
+  // Radial menu configuration - 4 quadrants within 270° range
+  // Based on actual hand roll: pointing up ≈ -90°, range from -135° to 135°
+  const menuItems: MenuItem[] = [
+    { name: 'Pen', icon: '🖊️', startAngle: -135, endAngle: -67.5, color: '#3B82F6' },    // Blue (wrist far left)
+    { name: 'Pencil', icon: '✏️', startAngle: -67.5, endAngle: 0, color: '#10B981' },     // Green (pointing up)
+    { name: 'Brush', icon: '🖌️', startAngle: 0, endAngle: 67.5, color: '#F59E0B' },      // Orange (wrist right)
+    { name: 'Eraser', icon: '🧹', startAngle: 67.5, endAngle: 135, color: '#EF4444' },   // Red (wrist far right)
+  ];
+
+  // Get selected menu item based on roll angle
+  const getSelectedMenuItem = (rollAngle: number): MenuItem | null => {
+    // Find which menu item range the roll angle falls into
+    for (const item of menuItems) {
+      if (rollAngle >= item.startAngle && rollAngle < item.endAngle) {
+        return item;
+      }
+    }
+
+    return menuItems[1]; // Default to Pencil if out of range
+  };
 
   // Detect gesture combinations
   const detectGestureCombos = useCallback((handData: HandData[]) => {
@@ -243,6 +272,106 @@ export default function GestureTracker() {
                   }
                 }
               });
+
+              // Draw radial menu for LEFT HAND when palm is open
+              if (!isRightHand && gesture.isOpen) {
+                const palmPos = normalizeToScreen(
+                  gesture.palmCenter,
+                  canvas.width,
+                  canvas.height
+                );
+
+                const menuRadius = 120;
+                const innerRadius = 40;
+                const selectedItem = getSelectedMenuItem(gesture.rotation.roll);
+
+                // Draw menu segments
+                menuItems.forEach((item) => {
+                  // Draw at actual angles (no offset)
+                  const startAngle = item.startAngle * Math.PI / 180;
+                  const endAngle = item.endAngle * Math.PI / 180;
+                  const isSelected = selectedItem?.name === item.name;
+
+                  // Draw segment
+                  ctx.beginPath();
+                  ctx.arc(palmPos.x, palmPos.y, menuRadius, startAngle, endAngle);
+                  ctx.arc(palmPos.x, palmPos.y, innerRadius, endAngle, startAngle, true);
+                  ctx.closePath();
+
+                  // Fill with color (brighter if selected)
+                  ctx.fillStyle = isSelected ? item.color : item.color + '80'; // 80 = 50% opacity
+                  ctx.fill();
+
+                  // Outline
+                  ctx.strokeStyle = isSelected ? '#FFFFFF' : '#FFFFFF40';
+                  ctx.lineWidth = isSelected ? 3 : 1;
+                  ctx.stroke();
+
+                  // Draw icon at actual angle (no offset)
+                  const midAngleDeg = (item.startAngle + item.endAngle) / 2;
+                  const midAngle = midAngleDeg * Math.PI / 180;
+                  const iconRadius = (menuRadius + innerRadius) / 2;
+                  const iconX = palmPos.x + Math.cos(midAngle) * iconRadius;
+                  const iconY = palmPos.y + Math.sin(midAngle) * iconRadius;
+
+                  ctx.font = isSelected ? 'bold 24px sans-serif' : '20px sans-serif';
+                  ctx.textAlign = 'center';
+                  ctx.textBaseline = 'middle';
+                  ctx.fillStyle = '#FFFFFF';
+                  ctx.fillText(item.icon, iconX, iconY);
+                });
+
+                // Draw disabled zone (the 90° where hand can't rotate)
+                // From 135° to -135° (or 135° to 225° in 0-360 range)
+                const disabledStartAngle = (135) * Math.PI / 180;
+                const disabledEndAngle = (225) * Math.PI / 180;
+                ctx.beginPath();
+                ctx.arc(palmPos.x, palmPos.y, menuRadius, disabledStartAngle, disabledEndAngle);
+                ctx.arc(palmPos.x, palmPos.y, innerRadius, disabledEndAngle, disabledStartAngle, true);
+                ctx.closePath();
+                ctx.fillStyle = '#00000080';
+                ctx.fill();
+                ctx.strokeStyle = '#FFFFFF20';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Draw center circle
+                ctx.beginPath();
+                ctx.arc(palmPos.x, palmPos.y, innerRadius, 0, 2 * Math.PI);
+                ctx.fillStyle = '#000000CC';
+                ctx.fill();
+                ctx.strokeStyle = '#FFFFFF';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Draw selected item name in center
+                if (selectedItem) {
+                  ctx.font = 'bold 12px sans-serif';
+                  ctx.fillStyle = '#FFFFFF';
+                  ctx.textAlign = 'center';
+                  ctx.textBaseline = 'middle';
+                  ctx.fillText(selectedItem.name, palmPos.x, palmPos.y - 8);
+
+                  // Debug: show roll angle
+                  ctx.font = '9px monospace';
+                  ctx.fillStyle = '#AAAAAA';
+                  ctx.fillText(`${gesture.rotation.roll.toFixed(0)}°`, palmPos.x, palmPos.y + 8);
+                }
+
+                // Draw roll indicator line at actual angle
+                const rollAngle = gesture.rotation.roll * Math.PI / 180;
+                const lineStartX = palmPos.x + Math.cos(rollAngle) * innerRadius;
+                const lineStartY = palmPos.y + Math.sin(rollAngle) * innerRadius;
+                const lineEndX = palmPos.x + Math.cos(rollAngle) * menuRadius;
+                const lineEndY = palmPos.y + Math.sin(rollAngle) * menuRadius;
+
+                ctx.beginPath();
+                ctx.moveTo(lineStartX, lineStartY);
+                ctx.lineTo(lineEndX, lineEndY);
+                ctx.strokeStyle = '#FFFF00';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+              }
             }
 
             setHands(detectedHands);
@@ -372,7 +501,7 @@ export default function GestureTracker() {
           {/* Gesture Combinations Display */}
           <div className="bg-gray-800/50 backdrop-blur-sm rounded-lg p-4 border border-gray-700">
             <h3 className="text-lg font-semibold text-white mb-3">Active Gesture Combinations</h3>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-2 mb-3">
               {gestureCombos.length === 0 ? (
                 <div className="col-span-2 text-center text-gray-500 py-4">
                   No gesture combinations detected
@@ -387,6 +516,18 @@ export default function GestureTracker() {
                   </div>
                 ))
               )}
+            </div>
+
+            {/* Radial Menu Instructions */}
+            <div className="mt-3 pt-3 border-t border-gray-700">
+              <div className="text-xs text-gray-400 space-y-1">
+                <p className="font-semibold text-purple-400 mb-2">🎯 Radial Menu Controls:</p>
+                <p>• Show your <span className="text-red-400 font-semibold">LEFT HAND</span> with palm open (all fingers spread)</p>
+                <p>• Radial menu appears on your palm center (270° range)</p>
+                <p>• <span className="text-yellow-400 font-semibold">Rotate your wrist left/right</span> to select tools</p>
+                <p>• Hand pointing <strong>up</strong> = <span className="text-green-400">✏️ Pencil</span> | Rotate <strong>left</strong> = <span className="text-blue-400">🖊️ Pen</span> | Rotate <strong>right</strong> = <span className="text-orange-400">🖌️ Brush</span> or <span className="text-red-400">🧹 Eraser</span></p>
+                <p>• Yellow line and angle value show current rotation</p>
+              </div>
             </div>
           </div>
         </div>
@@ -419,6 +560,26 @@ export default function GestureTracker() {
                   )}
                 </div>
               </div>
+
+              {/* Radial Menu Selection - Only for Left Hand when Open */}
+              {hand.handedness === 'Left' && hand.gesture.isOpen && (
+                <div className="mb-4 p-3 bg-gradient-to-r from-purple-900/50 to-blue-900/50 rounded-lg border border-purple-500/50">
+                  <h4 className="text-sm font-semibold text-purple-300 mb-2 flex items-center gap-2">
+                    🎯 Radial Menu Active
+                  </h4>
+                  <div className="text-center">
+                    <div className="text-3xl mb-2">
+                      {getSelectedMenuItem(hand.gesture.rotation.roll)?.icon}
+                    </div>
+                    <div className="text-white font-bold text-lg">
+                      {getSelectedMenuItem(hand.gesture.rotation.roll)?.name}
+                    </div>
+                    <div className="text-xs text-gray-400 mt-1">
+                      Rotate wrist to change selection
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Pinch Status */}
               <div className="mb-4">
