@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Matter from 'matter-js';
+import * as THREE from 'three';
 
 // TypeScript declarations for MediaPipe libraries
 declare global {
@@ -48,6 +49,7 @@ export default function HandTracker() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const physicsCanvasRef = useRef<HTMLCanvasElement>(null);
   const waterCanvasRef = useRef<HTMLCanvasElement>(null);
+  const threejsCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [handsDetected, setHandsDetected] = useState(0);
@@ -57,6 +59,7 @@ export default function HandTracker() {
   const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('solid');
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
   const [particleCount, setParticleCount] = useState(0);
+  const [splatActive, setSplatActive] = useState(false);
 
   // Matter.js refs
   const engineRef = useRef<Matter.Engine | null>(null);
@@ -80,6 +83,22 @@ export default function HandTracker() {
   const grabbedBoxRef = useRef<Matter.Body | null>(null);
   const previousGrabPosRef = useRef<{ x: number; y: number } | null>(null);
   const grabVelocityRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // SPLAT gesture refs
+  const prevSplatStateRef = useRef(false);
+  const splatCooldownRef = useRef(false);
+
+  // Three.js refs for 3D models
+  const threeSceneRef = useRef<THREE.Scene | null>(null);
+  const threeCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const threeRendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const threeModelsRef = useRef<Array<{
+    mesh: THREE.Mesh;
+    box: Matter.Body;
+    scale: number;
+    targetScale: number;
+    color: string;
+  }>>([]);
 
   // Helper function to calculate Euclidean distance
   const calculateDistance = (point1: { x: number; y: number }, point2: { x: number; y: number }) => {
@@ -148,6 +167,42 @@ export default function HandTracker() {
     return (indexDown || middleDown) && tipsBelow;
   };
 
+  // Detect open hand gesture (all fingers extended)
+  const detectOpenHand = (landmarks: any) => {
+    const indexTip = landmarks[8];
+    const indexMcp = landmarks[5];
+    const middleTip = landmarks[12];
+    const middleMcp = landmarks[9];
+    const ringTip = landmarks[16];
+    const ringMcp = landmarks[13];
+    const pinkyTip = landmarks[20];
+    const pinkyMcp = landmarks[17];
+
+    // Check if all fingers are extended (tips higher than bases)
+    const indexExtended = indexTip.y < indexMcp.y - 0.03;
+    const middleExtended = middleTip.y < middleMcp.y - 0.03;
+    const ringExtended = ringTip.y < ringMcp.y - 0.03;
+    const pinkyExtended = pinkyTip.y < pinkyMcp.y - 0.03;
+
+    return indexExtended && middleExtended && ringExtended && pinkyExtended;
+  };
+
+  // Detect palm facing camera (based on landmark z-depth)
+  const detectPalmFacingCamera = (landmarks: any) => {
+    const wrist = landmarks[0];
+    const middleMcp = landmarks[9]; // Middle finger base
+    const middleTip = landmarks[12];
+
+    // When palm faces camera, wrist is pushed back (further from camera)
+    // Wrist should be further from camera than middle finger MCP
+    const wristBehindPalm = wrist.z > middleMcp.z - 0.02;
+
+    // Fingertips should be closer to camera than wrist
+    const tipsForward = middleTip.z < wrist.z + 0.03;
+
+    return wristBehindPalm && tipsForward;
+  };
+
   // Find the closest box to a position
   const findClosestBox = (position: { x: number; y: number }, maxDistance: number = 100) => {
     let closestBox: Matter.Body | null = null;
@@ -165,6 +220,144 @@ export default function HandTracker() {
     });
 
     return closestBox;
+  };
+
+  // Check if a box is floating (not touching ground or walls)
+  const isBoxFloating = (box: Matter.Body) => {
+    if (!engineRef.current || !groundRef.current) return false;
+
+    // Check if box has significant velocity (still moving)
+    const isMoving = Math.abs(box.velocity.x) > 0.5 || Math.abs(box.velocity.y) > 0.5;
+
+    // Check if box is far from ground (y position of bottom edge)
+    const boxBottom = box.position.y + (box.bounds.max.y - box.bounds.min.y) / 2;
+    const groundTop = groundRef.current.position.y - 10;
+    const isAboveGround = boxBottom < groundTop - 20;
+
+    return isMoving && isAboveGround;
+  };
+
+  // Convert floating boxes to 3D models
+  const convertFloatingBoxesTo3D = () => {
+    if (!threeSceneRef.current || !engineRef.current) return;
+
+    const floatingBoxes = boxesRef.current.filter(box => isBoxFloating(box));
+
+    floatingBoxes.forEach(box => {
+      // Check if already converted
+      const alreadyConverted = threeModelsRef.current.some(model => model.box === box);
+      if (alreadyConverted) return;
+
+      const width = box.bounds.max.x - box.bounds.min.x;
+      const height = box.bounds.max.y - box.bounds.min.y;
+      const depth = Math.min(width, height); // Use smaller dimension for depth
+
+      // Create 3D box geometry
+      const geometry = new THREE.BoxGeometry(width, height, depth);
+      const material = new THREE.MeshPhongMaterial({
+        color: box.render.fillStyle as string,
+        shininess: 100,
+        specular: 0x444444,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+
+      // Position at box location (convert from 2D to 3D space)
+      mesh.position.set(
+        box.position.x - 640, // Center at 0
+        360 - box.position.y, // Flip Y axis
+        0
+      );
+
+      mesh.rotation.z = box.angle;
+
+      // Start small for animation
+      mesh.scale.set(0.1, 0.1, 0.1);
+
+      threeSceneRef.current.add(mesh);
+      threeModelsRef.current.push({
+        mesh,
+        box,
+        scale: 0.1,
+        targetScale: 1.0,
+        color: box.render.fillStyle as string,
+      });
+
+      // Hide the 2D box by making it invisible in the physics renderer
+      box.render.visible = false;
+    });
+  };
+
+  // Initialize Three.js for 3D models
+  const initializeThreeJS = () => {
+    const canvas = threejsCanvasRef.current;
+    if (!canvas) return;
+
+    // Create scene
+    const scene = new THREE.Scene();
+    threeSceneRef.current = scene;
+
+    // Create camera
+    const camera = new THREE.PerspectiveCamera(75, 1280 / 720, 0.1, 2000);
+    camera.position.z = 500;
+    threeCameraRef.current = camera;
+
+    // Create renderer
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      alpha: true,
+      antialias: true,
+    });
+    renderer.setSize(1280, 720);
+    renderer.setClearColor(0x000000, 0);
+    threeRendererRef.current = renderer;
+
+    // Add lights
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(200, 500, 300);
+    scene.add(directionalLight);
+
+    // Animation loop
+    const animate = () => {
+      requestAnimationFrame(animate);
+
+      // Update 3D models to follow their 2D counterparts
+      threeModelsRef.current.forEach((model, index) => {
+        // Animate scale expansion
+        if (model.scale < model.targetScale) {
+          model.scale += 0.05;
+          model.mesh.scale.set(model.scale, model.scale, model.scale);
+        }
+
+        // Update position and rotation to match physics body
+        if (model.box && !model.box.isStatic) {
+          model.mesh.position.set(
+            model.box.position.x - 640,
+            360 - model.box.position.y,
+            0
+          );
+          // Only use the Z rotation from the physics body (2D rotation)
+          model.mesh.rotation.z = model.box.angle;
+        }
+      });
+
+      // Remove models for boxes that no longer exist
+      threeModelsRef.current = threeModelsRef.current.filter(model => {
+        const stillExists = boxesRef.current.includes(model.box);
+        if (!stillExists) {
+          scene.remove(model.mesh);
+          model.mesh.geometry.dispose();
+          (model.mesh.material as THREE.Material).dispose();
+        }
+        return stillExists;
+      });
+
+      renderer.render(scene, camera);
+    };
+
+    animate();
   };
 
   // Initialize Matter.js physics engine
@@ -507,6 +700,16 @@ export default function HandTracker() {
     });
     fireParticlesRef.current = [];
 
+    // Clear 3D models
+    if (threeSceneRef.current) {
+      threeModelsRef.current.forEach(model => {
+        threeSceneRef.current!.remove(model.mesh);
+        model.mesh.geometry.dispose();
+        (model.mesh.material as THREE.Material).dispose();
+      });
+      threeModelsRef.current = [];
+    }
+
     setParticleCount(0);
   };
 
@@ -731,6 +934,50 @@ export default function HandTracker() {
                 engineRef.current.gravity.y = 0.5;
               }
             }
+
+            // SPLAT GESTURE: Both hands open with palms facing camera
+            let bothHandsOpen = false;
+            let bothPalmsFacingCamera = false;
+
+            if (results.multiHandLandmarks && results.multiHandedness && results.multiHandLandmarks.length === 2) {
+              const hand1Landmarks = results.multiHandLandmarks[0];
+              const hand2Landmarks = results.multiHandLandmarks[1];
+
+              const hand1Open = detectOpenHand(hand1Landmarks);
+              const hand2Open = detectOpenHand(hand2Landmarks);
+              const hand1PalmForward = detectPalmFacingCamera(hand1Landmarks);
+              const hand2PalmForward = detectPalmFacingCamera(hand2Landmarks);
+
+              bothHandsOpen = hand1Open && hand2Open;
+              bothPalmsFacingCamera = hand1PalmForward && hand2PalmForward;
+
+              const isSplatPose = bothHandsOpen && bothPalmsFacingCamera;
+
+              // Detect onset (transition from not-splat to splat) with cooldown
+              if (isSplatPose && !prevSplatStateRef.current && !splatCooldownRef.current) {
+                // Trigger splat!
+                setSplatActive(true);
+                splatCooldownRef.current = true;
+
+                // Convert floating boxes to 3D
+                convertFloatingBoxesTo3D();
+
+                // Reset splat visual after animation
+                setTimeout(() => {
+                  setSplatActive(false);
+                }, 500);
+
+                // Cooldown to prevent rapid re-triggering
+                setTimeout(() => {
+                  splatCooldownRef.current = false;
+                }, 800);
+              }
+
+              prevSplatStateRef.current = isSplatPose;
+            } else {
+              // Reset splat state when not detecting 2 hands
+              prevSplatStateRef.current = false;
+            }
           } else {
             setHandsDetected(0);
             // Reset pinch state if no hands detected
@@ -773,6 +1020,9 @@ export default function HandTracker() {
         // Initialize Matter.js physics
         initializeMatterJS();
 
+        // Initialize Three.js for 3D models
+        initializeThreeJS();
+
         // Start water rendering loop
         renderWater();
 
@@ -806,6 +1056,17 @@ export default function HandTracker() {
       }
       if (engineRef.current) {
         Matter.Engine.clear(engineRef.current);
+      }
+      // Cleanup Three.js
+      if (threeRendererRef.current) {
+        threeRendererRef.current.dispose();
+      }
+      if (threeSceneRef.current) {
+        threeModelsRef.current.forEach(model => {
+          threeSceneRef.current!.remove(model.mesh);
+          model.mesh.geometry.dispose();
+          (model.mesh.material as THREE.Material).dispose();
+        });
       }
     };
   }, [renderWater]);
@@ -870,6 +1131,45 @@ export default function HandTracker() {
         </defs>
       </svg>
 
+      {/* SPLAT Visual Feedback */}
+      {splatActive && (
+        <>
+          <div className="absolute inset-0 z-50 pointer-events-none flex items-center justify-center animate-splat-flash">
+            <div className="text-center">
+              <div className="text-9xl font-black text-white drop-shadow-[0_0_60px_rgba(255,255,0,1)] animate-splat-scale">
+                SPLAT!
+              </div>
+              <div className="text-6xl mt-4">💥✋✋💥</div>
+            </div>
+            <div className="absolute inset-0 bg-gradient-radial from-yellow-400/40 via-orange-500/20 to-transparent animate-splat-ring" />
+          </div>
+          <style jsx>{`
+            @keyframes splat-flash {
+              0% { background-color: rgba(255, 255, 0, 0.3); }
+              100% { background-color: transparent; }
+            }
+            @keyframes splat-scale {
+              0% { transform: scale(0.5); opacity: 0; }
+              50% { transform: scale(1.2); opacity: 1; }
+              100% { transform: scale(1); opacity: 0; }
+            }
+            @keyframes splat-ring {
+              0% { transform: scale(0.5); opacity: 0.8; }
+              100% { transform: scale(2); opacity: 0; }
+            }
+            .animate-splat-flash {
+              animation: splat-flash 0.5s ease-out forwards;
+            }
+            .animate-splat-scale {
+              animation: splat-scale 0.5s ease-out forwards;
+            }
+            .animate-splat-ring {
+              animation: splat-ring 0.5s ease-out forwards;
+            }
+          `}</style>
+        </>
+      )}
+
       {/* Status bar */}
       <div className="absolute top-4 left-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg">
         {isLoading ? (
@@ -884,7 +1184,9 @@ export default function HandTracker() {
             {isPinching && <span>Drawing</span>}
             {isGrabbing && <span>Grabbing</span>}
             {isAntigravity && <span className="text-purple-400 font-bold">Antigravity</span>}
+            {splatActive && <span className="text-yellow-400 font-bold animate-pulse">SPLAT! 💥</span>}
             <span>Boxes: {boxesRef.current.length}/{MAX_BOXES}</span>
+            {threeModelsRef.current.length > 0 && <span className="text-cyan-400">3D Models: {threeModelsRef.current.length}</span>}
             <span>Water: {particleCount}/{MAX_WATER_PARTICLES}</span>
             <span className="text-orange-400">Fire: {fireParticlesRef.current.length}/{MAX_FIRE_PARTICLES}</span>
           </div>
@@ -1027,6 +1329,15 @@ export default function HandTracker() {
         style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 2 }}
       />
 
+      {/* Three.js canvas for 3D models */}
+      <canvas
+        ref={threejsCanvasRef}
+        className="absolute max-w-full max-h-full pointer-events-none"
+        width={1280}
+        height={720}
+        style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 3 }}
+      />
+
       {/* Info panel */}
       <div className="absolute bottom-4 right-4 max-w-sm bg-black/70 text-white p-4 rounded-lg text-sm">
         <div className="flex justify-between items-start mb-2">
@@ -1042,7 +1353,9 @@ export default function HandTracker() {
           <li>Green = Right hand, Red = Left hand</li>
           <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : currentMaterial === 'water' ? 'water' : 'fire'}</li>
           <li><strong>Physics Mode:</strong> Pinch near a box to grab it, move to reposition, release pinch to throw</li>
-          <li><strong>Antigravity:</strong> Right hand points up + Left hand faces down (both required) to reverse gravity</li>
+          <li><strong>Antigravity:</strong> Right hand points up ☝️ + Left hand faces down 👇 (both required) to reverse gravity</li>
+          <li><strong>SPLAT! 💥:</strong> Both hands open with palms facing camera - explosive effect + converts floating boxes to rotating 3D models!</li>
+          <li><strong>3D Transform:</strong> Throw a box, while it's floating/airborne do SPLAT gesture to expand it into a 3D spinning cube</li>
           <li><strong>Solid:</strong> Rigid boxes that bounce and collide</li>
           <li><strong>Water:</strong> Liquid particles with metaball blur effect</li>
           <li><strong>Fire:</strong> Flame particles that float upward and burn boxes (boxes turn dark and disappear)</li>
