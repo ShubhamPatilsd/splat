@@ -159,22 +159,45 @@ export function calculateHandRotation(landmarks: Landmark[]): HandRotation {
   const pinkyMCP = landmarks[HandLandmark.PINKY_MCP];
   const middleMCP = landmarks[HandLandmark.MIDDLE_FINGER_MCP];
 
-  // Calculate roll (rotation around z-axis - twisting motion)
-  // Using the vector from pinky to index knuckle
-  const palmVector = {
-    x: indexMCP.x - pinkyMCP.x,
-    y: indexMCP.y - pinkyMCP.y,
-  };
-  const roll = Math.atan2(palmVector.y, palmVector.x);
+  // ROLL: Average angle of all fingers from their base to tip
+  // This measures wrist rotation/twist more robustly
+  const fingers = [
+    { base: HandLandmark.THUMB_MCP, tip: HandLandmark.THUMB_TIP },
+    { base: HandLandmark.INDEX_FINGER_MCP, tip: HandLandmark.INDEX_FINGER_TIP },
+    { base: HandLandmark.MIDDLE_FINGER_MCP, tip: HandLandmark.MIDDLE_FINGER_TIP },
+    { base: HandLandmark.RING_FINGER_MCP, tip: HandLandmark.RING_FINGER_TIP },
+    { base: HandLandmark.PINKY_MCP, tip: HandLandmark.PINKY_TIP },
+  ];
 
-  // Calculate pitch (rotation around x-axis - tilting forward/back)
-  // Using the average z-depth of knuckles vs wrist
-  const knuckleAvgZ = (indexMCP.z + middleMCP.z + pinkyMCP.z) / 3;
-  const pitch = Math.atan2(knuckleAvgZ - wrist.z, middleMCP.y - wrist.y);
+  let sumSin = 0;
+  let sumCos = 0;
 
-  // Calculate yaw (rotation around y-axis - turning left/right)
-  // Using the horizontal displacement
-  const yaw = Math.atan2(middleMCP.x - wrist.x, middleMCP.y - wrist.y);
+  fingers.forEach(finger => {
+    const base = landmarks[finger.base];
+    const tip = landmarks[finger.tip];
+    const dx = tip.x - base.x;
+    const dy = tip.y - base.y;
+    const angle = Math.atan2(dy, dx);
+
+    // Use sin/cos averaging to handle angle wraparound correctly
+    sumSin += Math.sin(angle);
+    sumCos += Math.cos(angle);
+  });
+
+  // Average angle using atan2 of averaged sin/cos
+  const roll = Math.atan2(sumSin / fingers.length, sumCos / fingers.length);
+
+  // PITCH: Tilt forward/backward
+  // Using the angle of wrist to middle knuckle vector
+  const pitchDy = middleMCP.y - wrist.y;
+  const pitchDz = middleMCP.z - wrist.z;
+  const pitch = Math.atan2(pitchDz, Math.abs(pitchDy));
+
+  // YAW: Turn left/right
+  // Using the angle of the palm width (pinky to index knuckle)
+  const yawDx = indexMCP.x - pinkyMCP.x;
+  const yawDz = indexMCP.z - pinkyMCP.z;
+  const yaw = Math.atan2(yawDz, yawDx);
 
   return {
     roll: radToDeg(roll),
