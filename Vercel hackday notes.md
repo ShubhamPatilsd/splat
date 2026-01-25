@@ -16,3 +16,5 @@ physics mode:
 - splat with both hands does gaussian splat
 - pointing with right index while left hand is posed in certain way changes gravity
 
+- Collaboraiton w multiple ppl squares
+
