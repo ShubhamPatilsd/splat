@@ -19,9 +19,12 @@ declare global {
 const BOX_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F'];
 const MAX_BOXES = 20;
 const MAX_WATER_PARTICLES = 500;
+const WOOD_TEXTURE_PATH = '/assets/1454771477.svg';
+const WOOD_TEXTURE_SIZE = 600;
 
 // Material types
 type MaterialType = 'solid' | 'water' | 'fire';
+type SolidStyle = 'color' | 'wood';
 
 // Interaction modes
 type InteractionMode = 'drawing' | 'physics';
@@ -57,6 +60,7 @@ export default function HandTracker() {
   const [isGrabbing, setIsGrabbing] = useState(false);
   const [isAntigravity, setIsAntigravity] = useState(false);
   const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('solid');
+  const [solidStyle, setSolidStyle] = useState<SolidStyle>('color');
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
   const [particleCount, setParticleCount] = useState(0);
   const [splatActive, setSplatActive] = useState(false);
@@ -77,6 +81,7 @@ export default function HandTracker() {
   const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
   const pinchCurrentRef = useRef<{ x: number; y: number } | null>(null);
   const currentMaterialRef = useRef<MaterialType>('solid');
+  const solidStyleRef = useRef<SolidStyle>('color');
   const interactionModeRef = useRef<InteractionMode>('drawing');
 
   // Throwing/grabbing refs
@@ -497,12 +502,24 @@ export default function HandTracker() {
 
     // Random color
     const color = BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)];
+    const useWoodTexture = solidStyleRef.current === 'wood';
 
     // Create Matter.js body
     const box = Matter.Bodies.rectangle(centerX, centerY, width, height, {
       restitution: 0.6,
       friction: 0.1,
-      render: { fillStyle: color }
+      render: {
+        fillStyle: color,
+        ...(useWoodTexture
+          ? {
+              sprite: {
+                texture: WOOD_TEXTURE_PATH,
+                xScale: width / WOOD_TEXTURE_SIZE,
+                yScale: height / WOOD_TEXTURE_SIZE
+              }
+            }
+          : {})
+      }
     });
 
     // Add to world
@@ -1238,47 +1255,80 @@ export default function HandTracker() {
 
         {/* Material selector - only show in drawing mode */}
         {interactionMode === 'drawing' && (
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold">Material:</span>
-            <button
-              onClick={() => {
-                setCurrentMaterial('solid');
-                currentMaterialRef.current = 'solid';
-              }}
-              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                currentMaterial === 'solid'
-                  ? 'bg-blue-600 hover:bg-blue-700'
-                  : 'bg-gray-600 hover:bg-gray-700'
-              }`}
-            >
-              Solid
-            </button>
-            <button
-              onClick={() => {
-                setCurrentMaterial('water');
-                currentMaterialRef.current = 'water';
-              }}
-              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                currentMaterial === 'water'
-                  ? 'bg-blue-600 hover:bg-blue-700'
-                  : 'bg-gray-600 hover:bg-gray-700'
-              }`}
-            >
-              Water
-            </button>
-            <button
-              onClick={() => {
-                setCurrentMaterial('fire');
-                currentMaterialRef.current = 'fire';
-              }}
-              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                currentMaterial === 'fire'
-                  ? 'bg-orange-600 hover:bg-orange-700'
-                  : 'bg-gray-600 hover:bg-gray-700'
-              }`}
-            >
-              Fire
-            </button>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold">Material:</span>
+              <button
+                onClick={() => {
+                  setCurrentMaterial('solid');
+                  currentMaterialRef.current = 'solid';
+                }}
+                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                  currentMaterial === 'solid'
+                    ? 'bg-blue-600 hover:bg-blue-700'
+                    : 'bg-gray-600 hover:bg-gray-700'
+                }`}
+              >
+                Solid
+              </button>
+              <button
+                onClick={() => {
+                  setCurrentMaterial('water');
+                  currentMaterialRef.current = 'water';
+                }}
+                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                  currentMaterial === 'water'
+                    ? 'bg-blue-600 hover:bg-blue-700'
+                    : 'bg-gray-600 hover:bg-gray-700'
+                }`}
+              >
+                Water
+              </button>
+              <button
+                onClick={() => {
+                  setCurrentMaterial('fire');
+                  currentMaterialRef.current = 'fire';
+                }}
+                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                  currentMaterial === 'fire'
+                    ? 'bg-orange-600 hover:bg-orange-700'
+                    : 'bg-gray-600 hover:bg-gray-700'
+                }`}
+              >
+                Fire
+              </button>
+            </div>
+            {currentMaterial === 'solid' && (
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold">Solid:</span>
+                <button
+                  onClick={() => {
+                    setSolidStyle('color');
+                    solidStyleRef.current = 'color';
+                  }}
+                  className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                    solidStyle === 'color'
+                      ? 'bg-emerald-600 hover:bg-emerald-700'
+                      : 'bg-gray-600 hover:bg-gray-700'
+                  }`}
+                >
+                  Color
+                </button>
+                <button
+                  onClick={() => {
+                    setSolidStyle('wood');
+                    solidStyleRef.current = 'wood';
+                  }}
+                  className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                    solidStyle === 'wood'
+                      ? 'bg-amber-600 hover:bg-amber-700'
+                      : 'bg-gray-600 hover:bg-gray-700'
+                  }`}
+                >
+                  Wood
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
