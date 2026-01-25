@@ -738,7 +738,7 @@ export default function HandTracker() {
       />
 
       {/* Info panel */}
-      <div className="absolute bottom-4 left-4 right-4 bg-black/70 text-white p-4 rounded-lg text-sm">
+      <div className="absolute bottom-4 right-4 max-w-sm bg-black/70 text-white p-4 rounded-lg text-sm">
         <div className="flex justify-between items-start mb-2">
           <p className="font-semibold">Hand Tracking Info:</p>
           <button
