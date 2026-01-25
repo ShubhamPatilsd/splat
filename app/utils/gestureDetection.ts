@@ -152,40 +152,24 @@ export function detectAllPinches(landmarks: Landmark[]): PinchGesture[] {
 
 /**
  * Calculate hand rotation based on landmarks
+ * Uses middle finger direction from palm center for visual accuracy
  */
 export function calculateHandRotation(landmarks: Landmark[]): HandRotation {
   const wrist = landmarks[HandLandmark.WRIST];
   const indexMCP = landmarks[HandLandmark.INDEX_FINGER_MCP];
   const pinkyMCP = landmarks[HandLandmark.PINKY_MCP];
   const middleMCP = landmarks[HandLandmark.MIDDLE_FINGER_MCP];
+  const middleTip = landmarks[HandLandmark.MIDDLE_FINGER_TIP];
 
-  // ROLL: Average angle of all fingers from their base to tip
-  // This measures wrist rotation/twist more robustly
-  const fingers = [
-    { base: HandLandmark.THUMB_MCP, tip: HandLandmark.THUMB_TIP },
-    { base: HandLandmark.INDEX_FINGER_MCP, tip: HandLandmark.INDEX_FINGER_TIP },
-    { base: HandLandmark.MIDDLE_FINGER_MCP, tip: HandLandmark.MIDDLE_FINGER_TIP },
-    { base: HandLandmark.RING_FINGER_MCP, tip: HandLandmark.RING_FINGER_TIP },
-    { base: HandLandmark.PINKY_MCP, tip: HandLandmark.PINKY_TIP },
-  ];
+  // Calculate palm center
+  const palmCenterX = (wrist.x + indexMCP.x + pinkyMCP.x) / 3;
+  const palmCenterY = (wrist.y + indexMCP.y + pinkyMCP.y) / 3;
 
-  let sumSin = 0;
-  let sumCos = 0;
-
-  fingers.forEach(finger => {
-    const base = landmarks[finger.base];
-    const tip = landmarks[finger.tip];
-    const dx = tip.x - base.x;
-    const dy = tip.y - base.y;
-    const angle = Math.atan2(dy, dx);
-
-    // Use sin/cos averaging to handle angle wraparound correctly
-    sumSin += Math.sin(angle);
-    sumCos += Math.cos(angle);
-  });
-
-  // Average angle using atan2 of averaged sin/cos
-  const roll = Math.atan2(sumSin / fingers.length, sumCos / fingers.length);
+  // ROLL: Direction from palm center to middle finger tip
+  // This matches visual perception of where the finger is pointing
+  const dx = middleTip.x - palmCenterX;
+  const dy = middleTip.y - palmCenterY;
+  const roll = Math.atan2(dy, dx);
 
   // PITCH: Tilt forward/backward
   // Using the angle of wrist to middle knuckle vector

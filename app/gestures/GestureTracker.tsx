@@ -7,6 +7,7 @@ import {
   normalizeToScreen,
   rotationToSliderValue,
   Landmark,
+  HandLandmark,
 } from '../utils/gestureDetection';
 
 declare global {
@@ -38,6 +39,44 @@ interface MenuItem {
   color: string;
 }
 
+// Radial menu configuration
+// Just set the total angle range and menu items - segments are auto-calculated!
+const MENU_START_ANGLE = -155;  // Start angle for entire menu (degrees)
+const MENU_END_ANGLE = -10;      // End angle for entire menu (degrees)
+const SENSITIVITY = 1.5;         // Rotation sensitivity multiplier (higher = more sensitive)
+
+const menuItemsConfig = [
+  { name: 'Pen', icon: '🖊️', color: '#3B82F6' },
+  { name: 'Pencil', icon: '✏️', color: '#10B981' },
+  { name: 'Brush', icon: '🖌️', color: '#F59E0B' },
+  { name: 'Eraser', icon: '🧹', color: '#EF4444' },
+];
+
+// Automatically divide the range into equal segments
+const totalRange = MENU_END_ANGLE - MENU_START_ANGLE;
+const segmentSize = totalRange / menuItemsConfig.length;
+
+const menuItems: MenuItem[] = menuItemsConfig.map((item, index) => ({
+  ...item,
+  startAngle: MENU_START_ANGLE + (segmentSize * index),
+  endAngle: MENU_START_ANGLE + (segmentSize * (index + 1)),
+}));
+
+// Get selected menu item based on roll angle
+const getSelectedMenuItem = (rollAngle: number): MenuItem | null => {
+  // Apply sensitivity multiplier to make rotation more responsive
+  const adjustedAngle = rollAngle * SENSITIVITY;
+
+  // Find which menu item range the adjusted angle falls into
+  for (const item of menuItems) {
+    if (adjustedAngle >= item.startAngle && adjustedAngle < item.endAngle) {
+      return item;
+    }
+  }
+
+  return menuItems[1]; // Default to Pencil if out of range
+};
+
 export default function GestureTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -46,32 +85,11 @@ export default function GestureTracker() {
   const [hands, setHands] = useState<HandData[]>([]);
   const [gestureCombos, setGestureCombos] = useState<GestureCombo[]>([]);
 
-  // Radial menu configuration - 4 quadrants within 270° range
-  // Based on actual hand roll: pointing up ≈ -90°, range from -135° to 135°
-  const menuItems: MenuItem[] = [
-    { name: 'Pen', icon: '🖊️', startAngle: -135, endAngle: -67.5, color: '#3B82F6' },    // Blue (wrist far left)
-    { name: 'Pencil', icon: '✏️', startAngle: -67.5, endAngle: 0, color: '#10B981' },     // Green (pointing up)
-    { name: 'Brush', icon: '🖌️', startAngle: 0, endAngle: 67.5, color: '#F59E0B' },      // Orange (wrist right)
-    { name: 'Eraser', icon: '🧹', startAngle: 67.5, endAngle: 135, color: '#EF4444' },   // Red (wrist far right)
-  ];
-
-  // Get selected menu item based on roll angle
-  const getSelectedMenuItem = (rollAngle: number): MenuItem | null => {
-    // Find which menu item range the roll angle falls into
-    for (const item of menuItems) {
-      if (rollAngle >= item.startAngle && rollAngle < item.endAngle) {
-        return item;
-      }
-    }
-
-    return menuItems[1]; // Default to Pencil if out of range
-  };
-
   // Detect gesture combinations
   const detectGestureCombos = useCallback((handData: HandData[]) => {
     const combos: GestureCombo[] = [];
 
-    handData.forEach((hand, index) => {
+    handData.forEach((hand) => {
       const g = hand.gesture;
 
       // Pinch + specific rotation
@@ -321,10 +339,9 @@ export default function GestureTracker() {
                   ctx.fillText(item.icon, iconX, iconY);
                 });
 
-                // Draw disabled zone (the 90° where hand can't rotate)
-                // From 135° to -135° (or 135° to 225° in 0-360 range)
-                const disabledStartAngle = (135) * Math.PI / 180;
-                const disabledEndAngle = (225) * Math.PI / 180;
+                // Draw disabled zone (area outside the menu range)
+                const disabledStartAngle = MENU_END_ANGLE * Math.PI / 180;
+                const disabledEndAngle = (MENU_START_ANGLE + 360) * Math.PI / 180;
                 ctx.beginPath();
                 ctx.arc(palmPos.x, palmPos.y, menuRadius, disabledStartAngle, disabledEndAngle);
                 ctx.arc(palmPos.x, palmPos.y, innerRadius, disabledEndAngle, disabledStartAngle, true);
@@ -352,18 +369,30 @@ export default function GestureTracker() {
                   ctx.textBaseline = 'middle';
                   ctx.fillText(selectedItem.name, palmPos.x, palmPos.y - 8);
 
-                  // Debug: show roll angle
+                  // Debug: show raw and adjusted roll angles
+                  const adjustedRoll = gesture.rotation.roll * SENSITIVITY;
                   ctx.font = '9px monospace';
                   ctx.fillStyle = '#AAAAAA';
-                  ctx.fillText(`${gesture.rotation.roll.toFixed(0)}°`, palmPos.x, palmPos.y + 8);
+                  ctx.fillText(`${adjustedRoll.toFixed(0)}°`, palmPos.x, palmPos.y + 8);
                 }
 
-                // Draw roll indicator line at actual angle
-                const rollAngle = gesture.rotation.roll * Math.PI / 180;
-                const lineStartX = palmPos.x + Math.cos(rollAngle) * innerRadius;
-                const lineStartY = palmPos.y + Math.sin(rollAngle) * innerRadius;
-                const lineEndX = palmPos.x + Math.cos(rollAngle) * menuRadius;
-                const lineEndY = palmPos.y + Math.sin(rollAngle) * menuRadius;
+                // Draw roll indicator line pointing towards middle finger tip
+                const middleTip = landmarks[HandLandmark.MIDDLE_FINGER_TIP];
+                const middleTipScreen = normalizeToScreen(
+                  { x: middleTip.x, y: middleTip.y },
+                  canvas.width,
+                  canvas.height
+                );
+
+                // Calculate angle from palm center to middle finger tip
+                const dx = middleTipScreen.x - palmPos.x;
+                const dy = middleTipScreen.y - palmPos.y;
+                const actualAngle = Math.atan2(dy, dx);
+
+                const lineStartX = palmPos.x + Math.cos(actualAngle) * innerRadius;
+                const lineStartY = palmPos.y + Math.sin(actualAngle) * innerRadius;
+                const lineEndX = palmPos.x + Math.cos(actualAngle) * menuRadius;
+                const lineEndY = palmPos.y + Math.sin(actualAngle) * menuRadius;
 
                 ctx.beginPath();
                 ctx.moveTo(lineStartX, lineStartY);
@@ -523,10 +552,11 @@ export default function GestureTracker() {
               <div className="text-xs text-gray-400 space-y-1">
                 <p className="font-semibold text-purple-400 mb-2">🎯 Radial Menu Controls:</p>
                 <p>• Show your <span className="text-red-400 font-semibold">LEFT HAND</span> with palm open (all fingers spread)</p>
-                <p>• Radial menu appears on your palm center (270° range)</p>
+                <p>• Radial menu appears on your palm center ({Math.round(MENU_END_ANGLE - MENU_START_ANGLE)}° range, {menuItemsConfig.length} segments)</p>
                 <p>• <span className="text-yellow-400 font-semibold">Rotate your wrist left/right</span> to select tools</p>
-                <p>• Hand pointing <strong>up</strong> = <span className="text-green-400">✏️ Pencil</span> | Rotate <strong>left</strong> = <span className="text-blue-400">🖊️ Pen</span> | Rotate <strong>right</strong> = <span className="text-orange-400">🖌️ Brush</span> or <span className="text-red-400">🧹 Eraser</span></p>
-                <p>• Yellow line and angle value show current rotation</p>
+                <p>• Uses <span className="text-green-400 font-semibold">MIDDLE FINGER</span> tracking with {SENSITIVITY}× sensitivity</p>
+                <p>• <span className="text-blue-400">🖊️ Pen</span> → <span className="text-green-400">✏️ Pencil</span> (pointing up) → <span className="text-orange-400">🖌️ Brush</span> → <span className="text-red-400">🧹 Eraser</span></p>
+                <p>• Yellow line and angle value show adjusted rotation</p>
               </div>
             </div>
           </div>
@@ -615,20 +645,25 @@ export default function GestureTracker() {
 
               {/* Rotation Values */}
               <div className="mb-4">
-                <h4 className="text-sm font-semibold text-gray-400 mb-2">Rotation (Degrees)</h4>
+                <h4 className="text-sm font-semibold text-gray-400 mb-2">Rotation (Middle Finger)</h4>
                 <div className="space-y-2">
                   <div className="bg-gray-900/50 rounded p-2">
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-white text-sm">Roll (Twist)</span>
-                      <span className="font-mono text-sm text-white">
-                        {hand.gesture.rotation.roll.toFixed(1)}°
-                      </span>
+                      <div className="flex flex-col items-end">
+                        <span className="font-mono text-sm text-white">
+                          {hand.gesture.rotation.roll.toFixed(1)}°
+                        </span>
+                        <span className="font-mono text-xs text-yellow-400">
+                          {(hand.gesture.rotation.roll * SENSITIVITY).toFixed(1)}° (×{SENSITIVITY})
+                        </span>
+                      </div>
                     </div>
                     <div className="w-full bg-gray-700 h-2 rounded-full overflow-hidden">
                       <div
                         className="h-full bg-blue-500 transition-all"
                         style={{
-                          width: `${Math.abs(hand.gesture.rotation.roll / 180) * 100}%`
+                          width: `${Math.abs((hand.gesture.rotation.roll * SENSITIVITY) / 180) * 100}%`
                         }}
                       />
                     </div>
@@ -675,9 +710,9 @@ export default function GestureTracker() {
                 <h4 className="text-sm font-semibold text-gray-400 mb-2">Slider Values (0-100)</h4>
                 <div className="space-y-1 text-xs">
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Roll Slider:</span>
+                    <span className="text-gray-400">Roll Slider (×{SENSITIVITY}):</span>
                     <span className="font-mono text-white">
-                      {rotationToSliderValue(hand.gesture.rotation.roll).toFixed(0)}
+                      {rotationToSliderValue(hand.gesture.rotation.roll * SENSITIVITY).toFixed(0)}
                     </span>
                   </div>
                   <div className="flex justify-between">
