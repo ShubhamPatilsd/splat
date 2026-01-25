@@ -185,6 +185,7 @@ export default function HandTracker() {
         });
 
         hands.setOptions({
+          selfieMode: true,
           maxNumHands: 2,
           modelComplexity: 1,
           minDetectionConfidence: 0.5,
