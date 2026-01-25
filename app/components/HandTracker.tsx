@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import Matter from 'matter-js';
 
 // TypeScript declarations for MediaPipe libraries
@@ -17,6 +17,7 @@ declare global {
 // Constants
 const BOX_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F'];
 const MAX_BOXES = 20;
+const MAX_WATER_PARTICLES = 500;
 
 // Material types
 type MaterialType = 'solid' | 'water';
@@ -24,17 +25,19 @@ type MaterialType = 'solid' | 'water';
 // Interaction modes
 type InteractionMode = 'drawing' | 'physics';
 
-// Water blob configuration
-const WATER_PARTICLE_SIZE = 15;
-const WATER_PARTICLE_SPACING = 25; // spacing between particles in grid
-const WATER_COLOR = '#4D9DE0';
-const WATER_CONSTRAINT_STIFFNESS = 0.9;
-const WATER_CONSTRAINT_DAMPING = 0.1;
+// Water configuration - using metaball/liquid rendering approach with Gaussian blur
+const WATER_PARTICLE_RADIUS = 12;
+const WATER_PARTICLE_SPACING = 20;
+const WATER_COLOR = 'rgba(77, 157, 224, 1)'; // Solid color for filter effect
+const WATER_BLUR_AMOUNT = 12; // Gaussian blur stdDeviation
+const WATER_CONTRAST = 20; // Color matrix alpha multiplier
+const WATER_THRESHOLD = -10; // Color matrix alpha offset
 
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const physicsCanvasRef = useRef<HTMLCanvasElement>(null);
+  const waterCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [handsDetected, setHandsDetected] = useState(0);
@@ -43,6 +46,7 @@ export default function HandTracker() {
   const [isAntigravity, setIsAntigravity] = useState(false);
   const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('solid');
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
+  const [particleCount, setParticleCount] = useState(0);
 
   // Matter.js refs
   const engineRef = useRef<Matter.Engine | null>(null);
@@ -50,9 +54,9 @@ export default function HandTracker() {
   const runnerRef = useRef<Matter.Runner | null>(null);
   const boxesRef = useRef<Matter.Body[]>([]);
   const waterParticlesRef = useRef<Matter.Body[]>([]);
-  const waterConstraintsRef = useRef<Matter.Constraint[]>([]);
   const groundRef = useRef<Matter.Body | null>(null);
   const wallsRef = useRef<Matter.Body[]>([]);
+  const waterAnimationRef = useRef<number | null>(null);
 
   // Gesture tracking refs
   const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -247,7 +251,7 @@ export default function HandTracker() {
     }
   };
 
-  // Create water blob with connected particles (soft body)
+  // Create liquid water particles (no constraints - true fluid behavior with Gaussian blur)
   const createWater = (start: { x: number; y: number }, end: { x: number; y: number }) => {
     if (!engineRef.current) return;
 
@@ -255,114 +259,88 @@ export default function HandTracker() {
     const height = Math.abs(end.y - start.y);
 
     // Minimum size validation
-    if (width < 40 || height < 40) return;
+    if (width < 30 || height < 30) return;
 
     const minX = Math.min(start.x, end.x);
-    const maxX = Math.max(start.x, end.x);
     const minY = Math.min(start.y, end.y);
-    const maxY = Math.max(start.y, end.y);
 
     // Calculate grid dimensions
-    const cols = Math.floor(width / WATER_PARTICLE_SPACING);
-    const rows = Math.floor(height / WATER_PARTICLE_SPACING);
+    const cols = Math.max(2, Math.floor(width / WATER_PARTICLE_SPACING));
+    const rows = Math.max(2, Math.floor(height / WATER_PARTICLE_SPACING));
 
-    if (cols < 2 || rows < 2) return;
+    // Check if we would exceed max particles
+    const newParticleCount = cols * rows;
+    if (waterParticlesRef.current.length + newParticleCount > MAX_WATER_PARTICLES) {
+      // Remove oldest particles to make room
+      const toRemove = Math.min(
+        waterParticlesRef.current.length,
+        (waterParticlesRef.current.length + newParticleCount) - MAX_WATER_PARTICLES
+      );
+      for (let i = 0; i < toRemove; i++) {
+        const oldParticle = waterParticlesRef.current.shift();
+        if (oldParticle && engineRef.current) {
+          Matter.World.remove(engineRef.current.world, oldParticle);
+        }
+      }
+    }
 
-    const particles: Matter.Body[][] = [];
-    const newParticles: Matter.Body[] = [];
-
-    // Create particles in a grid
+    // Create particles in a grid with slight randomness for natural look
     for (let row = 0; row < rows; row++) {
-      particles[row] = [];
       for (let col = 0; col < cols; col++) {
-        const x = minX + (width / (cols - 1)) * col;
-        const y = minY + (height / (rows - 1)) * row;
+        const x = minX + WATER_PARTICLE_SPACING * col + WATER_PARTICLE_SPACING / 2;
+        const y = minY + WATER_PARTICLE_SPACING * row + WATER_PARTICLE_SPACING / 2;
 
-        const particle = Matter.Bodies.circle(x, y, WATER_PARTICLE_SIZE, {
-          restitution: 0.1,
-          friction: 0.05,
-          frictionAir: 0.02,
-          density: 0.002,
+        // Add slight randomness to initial position
+        const randomX = x + (Math.random() - 0.5) * 4;
+        const randomY = y + (Math.random() - 0.5) * 4;
+
+        const particle = Matter.Bodies.circle(randomX, randomY, WATER_PARTICLE_RADIUS, {
+          restitution: 0.3,
+          friction: 0.0,
+          frictionAir: 0.01,
+          frictionStatic: 0,
+          density: 0.001,
+          slop: 0.5,
+          label: 'water',
           render: {
-            fillStyle: WATER_COLOR
+            visible: false // We render water separately with blur effect
           }
         });
 
-        particles[row][col] = particle;
-        newParticles.push(particle);
         Matter.World.add(engineRef.current.world, particle);
         waterParticlesRef.current.push(particle);
       }
     }
 
-    // Create constraints (springs) between adjacent particles
-    const newConstraints: Matter.Constraint[] = [];
-
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const current = particles[row][col];
-
-        // Connect to right neighbor
-        if (col < cols - 1) {
-          const right = particles[row][col + 1];
-          const constraint = Matter.Constraint.create({
-            bodyA: current,
-            bodyB: right,
-            stiffness: WATER_CONSTRAINT_STIFFNESS,
-            damping: WATER_CONSTRAINT_DAMPING,
-            render: { visible: false }
-          });
-          Matter.World.add(engineRef.current.world, constraint);
-          waterConstraintsRef.current.push(constraint);
-          newConstraints.push(constraint);
-        }
-
-        // Connect to bottom neighbor
-        if (row < rows - 1) {
-          const bottom = particles[row + 1][col];
-          const constraint = Matter.Constraint.create({
-            bodyA: current,
-            bodyB: bottom,
-            stiffness: WATER_CONSTRAINT_STIFFNESS,
-            damping: WATER_CONSTRAINT_DAMPING,
-            render: { visible: false }
-          });
-          Matter.World.add(engineRef.current.world, constraint);
-          waterConstraintsRef.current.push(constraint);
-          newConstraints.push(constraint);
-        }
-
-        // Connect to diagonal neighbors for more cohesion
-        if (row < rows - 1 && col < cols - 1) {
-          const diagonal = particles[row + 1][col + 1];
-          const constraint = Matter.Constraint.create({
-            bodyA: current,
-            bodyB: diagonal,
-            stiffness: WATER_CONSTRAINT_STIFFNESS * 0.5,
-            damping: WATER_CONSTRAINT_DAMPING,
-            render: { visible: false }
-          });
-          Matter.World.add(engineRef.current.world, constraint);
-          waterConstraintsRef.current.push(constraint);
-          newConstraints.push(constraint);
-        }
-
-        if (row < rows - 1 && col > 0) {
-          const diagonal = particles[row + 1][col - 1];
-          const constraint = Matter.Constraint.create({
-            bodyA: current,
-            bodyB: diagonal,
-            stiffness: WATER_CONSTRAINT_STIFFNESS * 0.5,
-            damping: WATER_CONSTRAINT_DAMPING,
-            render: { visible: false }
-          });
-          Matter.World.add(engineRef.current.world, constraint);
-          waterConstraintsRef.current.push(constraint);
-          newConstraints.push(constraint);
-        }
-      }
-    }
+    setParticleCount(waterParticlesRef.current.length);
   };
+
+  // Render water particles with Gaussian blur effect (metaball technique)
+  const renderWater = useCallback(() => {
+    const waterCanvas = waterCanvasRef.current;
+    if (!waterCanvas) return;
+
+    const ctx = waterCanvas.getContext('2d');
+    if (!ctx) return;
+
+    // Clear canvas
+    ctx.clearRect(0, 0, waterCanvas.width, waterCanvas.height);
+
+    // Draw each water particle as a circle
+    ctx.fillStyle = WATER_COLOR;
+
+    for (const particle of waterParticlesRef.current) {
+      const { x, y } = particle.position;
+      const radius = WATER_PARTICLE_RADIUS * 1.8; // Slightly larger for better blending
+
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Schedule next frame
+    waterAnimationRef.current = requestAnimationFrame(renderWater);
+  }, []);
 
   // Clear all boxes and water particles
   const clearAllBoxes = () => {
@@ -373,15 +351,11 @@ export default function HandTracker() {
     });
     boxesRef.current = [];
 
-    waterConstraintsRef.current.forEach(constraint => {
-      Matter.World.remove(engineRef.current!.world, constraint);
-    });
-    waterConstraintsRef.current = [];
-
     waterParticlesRef.current.forEach(particle => {
       Matter.World.remove(engineRef.current!.world, particle);
     });
     waterParticlesRef.current = [];
+    setParticleCount(0);
   };
 
   useEffect(() => {
@@ -647,6 +621,9 @@ export default function HandTracker() {
         // Initialize Matter.js physics
         initializeMatterJS();
 
+        // Start water rendering loop
+        renderWater();
+
         setIsLoading(false);
 
       } catch (err) {
@@ -666,6 +643,9 @@ export default function HandTracker() {
       if (hands) {
         hands.close();
       }
+      if (waterAnimationRef.current) {
+        cancelAnimationFrame(waterAnimationRef.current);
+      }
       if (runnerRef.current && engineRef.current) {
         Matter.Runner.stop(runnerRef.current);
       }
@@ -676,7 +656,7 @@ export default function HandTracker() {
         Matter.Engine.clear(engineRef.current);
       }
     };
-  }, []);
+  }, [renderWater]);
 
   // Function to load MediaPipe scripts dynamically
   const loadMediaPipeScripts = (): Promise<void> => {
@@ -720,6 +700,24 @@ export default function HandTracker() {
 
   return (
     <div className="relative w-full h-full flex flex-col items-center justify-center bg-black">
+      {/* SVG Filter for liquid/metaball effect */}
+      <svg style={{ position: 'absolute', width: 0, height: 0 }}>
+        <defs>
+          <filter id="liquid-filter">
+            {/* Gaussian blur to blend particles */}
+            <feGaussianBlur in="SourceGraphic" stdDeviation={WATER_BLUR_AMOUNT} result="blur" />
+            {/* Color matrix to increase contrast and create sharp edges */}
+            {/* The alpha channel is multiplied by WATER_CONTRAST and offset by WATER_THRESHOLD */}
+            <feColorMatrix
+              in="blur"
+              mode="matrix"
+              values={`1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 ${WATER_CONTRAST} ${WATER_THRESHOLD}`}
+              result="contrast"
+            />
+          </filter>
+        </defs>
+      </svg>
+
       {/* Status bar */}
       <div className="absolute top-4 left-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg">
         {isLoading ? (
@@ -731,11 +729,11 @@ export default function HandTracker() {
             <span>
               {handsDetected === 0 ? 'No hands detected' : `${handsDetected} hand${handsDetected > 1 ? 's' : ''} detected`}
             </span>
-            {isPinching && <span>🤏 Drawing</span>}
-            {isGrabbing && <span>🤏 Grabbing</span>}
-            {isAntigravity && <span className="text-purple-400 font-bold">☝️ Antigravity</span>}
+            {isPinching && <span>Drawing</span>}
+            {isGrabbing && <span>Grabbing</span>}
+            {isAntigravity && <span className="text-purple-400 font-bold">Antigravity</span>}
             <span>Boxes: {boxesRef.current.length}/{MAX_BOXES}</span>
-            <span>Water: {waterParticlesRef.current.length} particles</span>
+            <span>Water: {particleCount}/{MAX_WATER_PARTICLES}</span>
           </div>
         )}
       </div>
@@ -839,13 +837,28 @@ export default function HandTracker() {
         height={720}
       />
 
-      {/* Physics canvas (transparent overlay) */}
+      {/* Water canvas with liquid filter (rendered below physics) */}
+      <canvas
+        ref={waterCanvasRef}
+        className="absolute max-w-full max-h-full pointer-events-none"
+        width={1280}
+        height={720}
+        style={{
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          filter: 'url(#liquid-filter)',
+          zIndex: 1
+        }}
+      />
+
+      {/* Physics canvas (transparent overlay for solid objects) */}
       <canvas
         ref={physicsCanvasRef}
         className="absolute max-w-full max-h-full pointer-events-none"
         width={1280}
         height={720}
-        style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}
+        style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 2 }}
       />
 
       {/* Info panel */}
@@ -856,16 +869,16 @@ export default function HandTracker() {
             onClick={clearAllBoxes}
             className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs font-semibold transition-colors"
           >
-            Clear All ({boxesRef.current.length + waterParticlesRef.current.length})
+            Clear All ({boxesRef.current.length + particleCount})
           </button>
         </div>
         <ul className="list-disc list-inside space-y-1 text-xs">
           <li>Green = Right hand, Red = Left hand</li>
-          <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : 'water blobs'}</li>
+          <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : 'water'}</li>
           <li><strong>Physics Mode:</strong> Pinch near a box to grab it, move to reposition, release pinch to throw</li>
-          <li><strong>Antigravity:</strong> Right hand points up ☝️ + Left hand faces down 👇 (both required) to reverse gravity</li>
+          <li><strong>Antigravity:</strong> Right hand points up + Left hand faces down (both required) to reverse gravity</li>
           <li><strong>Solid material:</strong> Creates rigid boxes that bounce and collide</li>
-          <li><strong>Water material:</strong> Creates deformable soft body blobs with fluid-like behavior</li>
+          <li><strong>Water material:</strong> Creates liquid particles with Gaussian blur effect (metaball technique)</li>
           <li>Switch modes and materials using buttons in top-right corner</li>
         </ul>
       </div>
