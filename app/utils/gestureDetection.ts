@@ -48,6 +48,7 @@ export interface GestureState {
   palmCenter: { x: number; y: number };
   isOpen: boolean; // all fingers extended
   isFist: boolean; // all fingers closed
+  isPalmFacingCamera: boolean; // palm facing toward the camera
   fingerStates: {
     thumb: boolean;
     index: boolean;
@@ -254,6 +255,32 @@ export function calculatePalmCenter(landmarks: Landmark[]): { x: number; y: numb
 }
 
 /**
+ * Detect if palm is facing toward the camera
+ * When palm faces camera, the wrist z is larger (further) than fingertip z (closer)
+ * Also checks that the hand is relatively flat (not tilted sideways)
+ */
+export function isPalmFacingCamera(landmarks: Landmark[]): boolean {
+  const wrist = landmarks[HandLandmark.WRIST];
+  const middleMCP = landmarks[HandLandmark.MIDDLE_FINGER_MCP];
+  const middleTip = landmarks[HandLandmark.MIDDLE_FINGER_TIP];
+  const indexMCP = landmarks[HandLandmark.INDEX_FINGER_MCP];
+  const pinkyMCP = landmarks[HandLandmark.PINKY_MCP];
+
+  // Check 1: Wrist should be further from camera than middle finger MCP
+  // (palm facing forward means wrist is pushed back)
+  const wristBehindPalm = wrist.z > middleMCP.z - 0.02;
+
+  // Check 2: The palm plane should be roughly perpendicular to camera
+  // When palm faces camera, index and pinky MCPs have similar z values
+  const palmFlatToCamera = Math.abs(indexMCP.z - pinkyMCP.z) < 0.05;
+
+  // Check 3: Middle fingertip should be closer to camera than wrist when palm faces forward
+  const fingersForward = middleTip.z < wrist.z + 0.02;
+
+  return wristBehindPalm && palmFlatToCamera && fingersForward;
+}
+
+/**
  * Analyze complete gesture state for one hand
  */
 export function analyzeGesture(landmarks: Landmark[]): GestureState {
@@ -264,6 +291,7 @@ export function analyzeGesture(landmarks: Landmark[]): GestureState {
 
   const isOpen = Object.values(fingerStates).every(extended => extended);
   const isFist = Object.values(fingerStates).every(extended => !extended);
+  const palmFacingCamera = isPalmFacingCamera(landmarks);
 
   return {
     pinches,
@@ -271,6 +299,7 @@ export function analyzeGesture(landmarks: Landmark[]): GestureState {
     palmCenter,
     isOpen,
     isFist,
+    isPalmFacingCamera: palmFacingCamera,
     fingerStates,
   };
 }
