@@ -18,6 +18,16 @@ declare global {
 const BOX_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F'];
 const MAX_BOXES = 20;
 
+// Material types
+type MaterialType = 'solid' | 'water';
+
+// Water blob configuration
+const WATER_PARTICLE_SIZE = 15;
+const WATER_PARTICLE_SPACING = 25; // spacing between particles in grid
+const WATER_COLOR = '#4D9DE0';
+const WATER_CONSTRAINT_STIFFNESS = 0.9;
+const WATER_CONSTRAINT_DAMPING = 0.1;
+
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -26,18 +36,22 @@ export default function HandTracker() {
   const [error, setError] = useState<string | null>(null);
   const [handsDetected, setHandsDetected] = useState(0);
   const [isPinching, setIsPinching] = useState(false);
+  const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('solid');
 
   // Matter.js refs
   const engineRef = useRef<Matter.Engine | null>(null);
   const renderRef = useRef<Matter.Render | null>(null);
   const runnerRef = useRef<Matter.Runner | null>(null);
   const boxesRef = useRef<Matter.Body[]>([]);
+  const waterParticlesRef = useRef<Matter.Body[]>([]);
+  const waterConstraintsRef = useRef<Matter.Constraint[]>([]);
   const groundRef = useRef<Matter.Body | null>(null);
   const wallsRef = useRef<Matter.Body[]>([]);
 
   // Gesture tracking refs
   const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
   const pinchCurrentRef = useRef<{ x: number; y: number } | null>(null);
+  const currentMaterialRef = useRef<MaterialType>('solid');
 
   // Helper function to calculate Euclidean distance
   const calculateDistance = (point1: { x: number; y: number }, point2: { x: number; y: number }) => {
@@ -114,8 +128,17 @@ export default function HandTracker() {
     Matter.Runner.run(runner, engine);
   };
 
-  // Create a physics box
+  // Create a physics box or water based on material type
   const createBox = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+    if (currentMaterialRef.current === 'water') {
+      createWater(start, end);
+    } else {
+      createSolidBox(start, end);
+    }
+  };
+
+  // Create a solid physics box
+  const createSolidBox = (start: { x: number; y: number }, end: { x: number; y: number }) => {
     if (!engineRef.current) return;
 
     const width = Math.abs(end.x - start.x);
@@ -150,7 +173,124 @@ export default function HandTracker() {
     }
   };
 
-  // Clear all boxes
+  // Create water blob with connected particles (soft body)
+  const createWater = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+    if (!engineRef.current) return;
+
+    const width = Math.abs(end.x - start.x);
+    const height = Math.abs(end.y - start.y);
+
+    // Minimum size validation
+    if (width < 40 || height < 40) return;
+
+    const minX = Math.min(start.x, end.x);
+    const maxX = Math.max(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const maxY = Math.max(start.y, end.y);
+
+    // Calculate grid dimensions
+    const cols = Math.floor(width / WATER_PARTICLE_SPACING);
+    const rows = Math.floor(height / WATER_PARTICLE_SPACING);
+
+    if (cols < 2 || rows < 2) return;
+
+    const particles: Matter.Body[][] = [];
+    const newParticles: Matter.Body[] = [];
+
+    // Create particles in a grid
+    for (let row = 0; row < rows; row++) {
+      particles[row] = [];
+      for (let col = 0; col < cols; col++) {
+        const x = minX + (width / (cols - 1)) * col;
+        const y = minY + (height / (rows - 1)) * row;
+
+        const particle = Matter.Bodies.circle(x, y, WATER_PARTICLE_SIZE, {
+          restitution: 0.1,
+          friction: 0.05,
+          frictionAir: 0.02,
+          density: 0.002,
+          render: {
+            fillStyle: WATER_COLOR
+          }
+        });
+
+        particles[row][col] = particle;
+        newParticles.push(particle);
+        Matter.World.add(engineRef.current.world, particle);
+        waterParticlesRef.current.push(particle);
+      }
+    }
+
+    // Create constraints (springs) between adjacent particles
+    const newConstraints: Matter.Constraint[] = [];
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const current = particles[row][col];
+
+        // Connect to right neighbor
+        if (col < cols - 1) {
+          const right = particles[row][col + 1];
+          const constraint = Matter.Constraint.create({
+            bodyA: current,
+            bodyB: right,
+            stiffness: WATER_CONSTRAINT_STIFFNESS,
+            damping: WATER_CONSTRAINT_DAMPING,
+            render: { visible: false }
+          });
+          Matter.World.add(engineRef.current.world, constraint);
+          waterConstraintsRef.current.push(constraint);
+          newConstraints.push(constraint);
+        }
+
+        // Connect to bottom neighbor
+        if (row < rows - 1) {
+          const bottom = particles[row + 1][col];
+          const constraint = Matter.Constraint.create({
+            bodyA: current,
+            bodyB: bottom,
+            stiffness: WATER_CONSTRAINT_STIFFNESS,
+            damping: WATER_CONSTRAINT_DAMPING,
+            render: { visible: false }
+          });
+          Matter.World.add(engineRef.current.world, constraint);
+          waterConstraintsRef.current.push(constraint);
+          newConstraints.push(constraint);
+        }
+
+        // Connect to diagonal neighbors for more cohesion
+        if (row < rows - 1 && col < cols - 1) {
+          const diagonal = particles[row + 1][col + 1];
+          const constraint = Matter.Constraint.create({
+            bodyA: current,
+            bodyB: diagonal,
+            stiffness: WATER_CONSTRAINT_STIFFNESS * 0.5,
+            damping: WATER_CONSTRAINT_DAMPING,
+            render: { visible: false }
+          });
+          Matter.World.add(engineRef.current.world, constraint);
+          waterConstraintsRef.current.push(constraint);
+          newConstraints.push(constraint);
+        }
+
+        if (row < rows - 1 && col > 0) {
+          const diagonal = particles[row + 1][col - 1];
+          const constraint = Matter.Constraint.create({
+            bodyA: current,
+            bodyB: diagonal,
+            stiffness: WATER_CONSTRAINT_STIFFNESS * 0.5,
+            damping: WATER_CONSTRAINT_DAMPING,
+            render: { visible: false }
+          });
+          Matter.World.add(engineRef.current.world, constraint);
+          waterConstraintsRef.current.push(constraint);
+          newConstraints.push(constraint);
+        }
+      }
+    }
+  };
+
+  // Clear all boxes and water particles
   const clearAllBoxes = () => {
     if (!engineRef.current) return;
 
@@ -158,6 +298,16 @@ export default function HandTracker() {
       Matter.World.remove(engineRef.current!.world, box);
     });
     boxesRef.current = [];
+
+    waterConstraintsRef.current.forEach(constraint => {
+      Matter.World.remove(engineRef.current!.world, constraint);
+    });
+    waterConstraintsRef.current = [];
+
+    waterParticlesRef.current.forEach(particle => {
+      Matter.World.remove(engineRef.current!.world, particle);
+    });
+    waterParticlesRef.current = [];
   };
 
   useEffect(() => {
@@ -245,7 +395,7 @@ export default function HandTracker() {
 
                   // Draw preview outline
                   if (pinchStartRef.current && pinchCurrentRef.current) {
-                    ctx.strokeStyle = '#FFFFFF';
+                    ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : '#FFFFFF';
                     ctx.lineWidth = 2;
                     ctx.setLineDash([5, 5]);
                     const width = pinchCurrentRef.current.x - pinchStartRef.current.x;
@@ -382,8 +532,42 @@ export default function HandTracker() {
             </span>
             {isPinching && <span>🤏 Pinching</span>}
             <span>Boxes: {boxesRef.current.length}/{MAX_BOXES}</span>
+            <span>Water: {waterParticlesRef.current.length} particles</span>
           </div>
         )}
+      </div>
+
+      {/* Material selector */}
+      <div className="absolute top-4 right-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">Material:</span>
+          <button
+            onClick={() => {
+              setCurrentMaterial('solid');
+              currentMaterialRef.current = 'solid';
+            }}
+            className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+              currentMaterial === 'solid'
+                ? 'bg-blue-600 hover:bg-blue-700'
+                : 'bg-gray-600 hover:bg-gray-700'
+            }`}
+          >
+            Solid
+          </button>
+          <button
+            onClick={() => {
+              setCurrentMaterial('water');
+              currentMaterialRef.current = 'water';
+            }}
+            className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+              currentMaterial === 'water'
+                ? 'bg-blue-600 hover:bg-blue-700'
+                : 'bg-gray-600 hover:bg-gray-700'
+            }`}
+          >
+            Water
+          </button>
+        </div>
       </div>
 
       {/* Loading spinner */}
@@ -425,16 +609,17 @@ export default function HandTracker() {
             onClick={clearAllBoxes}
             className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs font-semibold transition-colors"
           >
-            Clear Boxes ({boxesRef.current.length})
+            Clear All ({boxesRef.current.length + waterParticlesRef.current.length})
           </button>
         </div>
         <ul className="list-disc list-inside space-y-1 text-xs">
           <li>Green = Right hand, Red = Left hand</li>
           <li>Pinch thumb and index finger together to start drawing</li>
-          <li>Drag while pinching to define box size</li>
-          <li>Release to create a physics-enabled box</li>
-          <li>Boxes fall and collide with realistic physics</li>
-          <li>Maximum 20 boxes (oldest removed automatically)</li>
+          <li>Drag while pinching to define area size</li>
+          <li>Release to create physics-enabled objects</li>
+          <li><strong>Solid mode:</strong> Creates rigid boxes that bounce and collide</li>
+          <li><strong>Water mode:</strong> Creates fluid particles with cohesion, surface tension, and flow behavior</li>
+          <li>Switch materials using buttons in top-right corner</li>
         </ul>
       </div>
     </div>
