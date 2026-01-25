@@ -40,6 +40,7 @@ export default function HandTracker() {
   const [handsDetected, setHandsDetected] = useState(0);
   const [isPinching, setIsPinching] = useState(false);
   const [isGrabbing, setIsGrabbing] = useState(false);
+  const [isAntigravity, setIsAntigravity] = useState(false);
   const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('solid');
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
 
@@ -86,6 +87,49 @@ export default function HandTracker() {
     };
 
     return { isPinchActive, position };
+  };
+
+  // Detect pointing up gesture (index finger pointing upward)
+  const detectPointingUpGesture = (landmarks: any) => {
+    const indexTip = landmarks[8];
+    const indexMcp = landmarks[5]; // Base of index finger
+    const middleTip = landmarks[12];
+    const middleMcp = landmarks[9];
+    const ringTip = landmarks[16];
+    const ringMcp = landmarks[13];
+    const pinkyTip = landmarks[20];
+    const pinkyMcp = landmarks[17];
+    const wrist = landmarks[0];
+
+    // Check if index finger is extended upward (tip higher than base and wrist)
+    const indexExtended = indexTip.y < indexMcp.y - 0.08 && indexTip.y < wrist.y - 0.1;
+
+    // Check if other fingers are curled
+    const middleCurled = middleTip.y > middleMcp.y - 0.03;
+    const ringCurled = ringTip.y > ringMcp.y - 0.03;
+    const pinkyCurled = pinkyTip.y > pinkyMcp.y - 0.03;
+
+    return indexExtended && middleCurled && ringCurled && pinkyCurled;
+  };
+
+  // Detect palm down gesture (hand facing downward)
+  const detectPalmDownGesture = (landmarks: any) => {
+    const indexTip = landmarks[8];
+    const middleTip = landmarks[12];
+    const ringTip = landmarks[16];
+    const pinkyTip = landmarks[20];
+    const wrist = landmarks[0];
+    const indexMcp = landmarks[5];
+    const middleMcp = landmarks[9];
+
+    // Check if fingertips are below their bases (pointing downward)
+    const indexDown = indexTip.y > indexMcp.y + 0.03;
+    const middleDown = middleTip.y > middleMcp.y + 0.03;
+
+    // Check if fingertips are generally below wrist (hand facing down)
+    const tipsBelow = indexTip.y > wrist.y && middleTip.y > wrist.y;
+
+    return (indexDown || middleDown) && tipsBelow;
   };
 
   // Find the closest box to a position
@@ -500,6 +544,66 @@ export default function HandTracker() {
                   }
                 }
               }
+
+            }
+
+            // Check for antigravity gesture (requires BOTH hands)
+            let rightHandPointingUp = false;
+            let leftHandPalmDown = false;
+
+            if (results.multiHandLandmarks && results.multiHandedness) {
+              for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                const landmarks = results.multiHandLandmarks[i];
+                const handedness = results.multiHandedness[i];
+                const isRightHand = handedness.label === 'Right';
+
+                if (isRightHand && detectPointingUpGesture(landmarks)) {
+                  rightHandPointingUp = true;
+                }
+                if (!isRightHand && detectPalmDownGesture(landmarks)) {
+                  leftHandPalmDown = true;
+                }
+              }
+            }
+
+            // Activate antigravity only if BOTH gestures are active
+            if (rightHandPointingUp && leftHandPalmDown) {
+              setIsAntigravity(true);
+              // Set negative gravity (antigravity)
+              if (engineRef.current) {
+                engineRef.current.gravity.y = -0.5;
+              }
+
+              // Draw antigravity visual effect
+              ctx.save();
+              ctx.globalAlpha = 0.3;
+              ctx.fillStyle = '#9333EA'; // purple overlay
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+              // Draw upward arrows
+              ctx.globalAlpha = 0.7;
+              ctx.strokeStyle = '#C084FC';
+              ctx.lineWidth = 4;
+              ctx.lineCap = 'round';
+              for (let x = 100; x < canvas.width; x += 150) {
+                for (let y = 100; y < canvas.height; y += 150) {
+                  // Draw upward arrow
+                  ctx.beginPath();
+                  ctx.moveTo(x, y + 20);
+                  ctx.lineTo(x, y - 20);
+                  ctx.lineTo(x - 10, y - 10);
+                  ctx.moveTo(x, y - 20);
+                  ctx.lineTo(x + 10, y - 10);
+                  ctx.stroke();
+                }
+              }
+              ctx.restore();
+            } else {
+              // Reset gravity if gestures are not both active
+              setIsAntigravity(false);
+              if (engineRef.current) {
+                engineRef.current.gravity.y = 0.5;
+              }
             }
           } else {
             setHandsDetected(0);
@@ -515,6 +619,12 @@ export default function HandTracker() {
               previousGrabPosRef.current = null;
               grabVelocityRef.current = { x: 0, y: 0 };
               setIsGrabbing(false);
+            }
+
+            // Reset gravity if no hands detected
+            setIsAntigravity(false);
+            if (engineRef.current) {
+              engineRef.current.gravity.y = 0.5;
             }
           }
 
@@ -623,6 +733,7 @@ export default function HandTracker() {
             </span>
             {isPinching && <span>🤏 Drawing</span>}
             {isGrabbing && <span>🤏 Grabbing</span>}
+            {isAntigravity && <span className="text-purple-400 font-bold">☝️ Antigravity</span>}
             <span>Boxes: {boxesRef.current.length}/{MAX_BOXES}</span>
             <span>Water: {waterParticlesRef.current.length} particles</span>
           </div>
@@ -752,6 +863,7 @@ export default function HandTracker() {
           <li>Green = Right hand, Red = Left hand</li>
           <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : 'water blobs'}</li>
           <li><strong>Physics Mode:</strong> Pinch near a box to grab it, move to reposition, release pinch to throw</li>
+          <li><strong>Antigravity:</strong> Right hand points up ☝️ + Left hand faces down 👇 (both required) to reverse gravity</li>
           <li><strong>Solid material:</strong> Creates rigid boxes that bounce and collide</li>
           <li><strong>Water material:</strong> Creates deformable soft body blobs with fluid-like behavior</li>
           <li>Switch modes and materials using buttons in top-right corner</li>
