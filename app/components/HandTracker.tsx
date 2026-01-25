@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import Matter from 'matter-js';
 
 // TypeScript declarations for MediaPipe libraries
@@ -17,24 +17,37 @@ declare global {
 // Constants
 const BOX_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F'];
 const MAX_BOXES = 20;
+const MAX_WATER_PARTICLES = 500;
 
 // Material types
-type MaterialType = 'solid' | 'water';
+type MaterialType = 'solid' | 'water' | 'fire';
 
 // Interaction modes
 type InteractionMode = 'drawing' | 'physics';
 
-// Water blob configuration
-const WATER_PARTICLE_SIZE = 15;
-const WATER_PARTICLE_SPACING = 25; // spacing between particles in grid
-const WATER_COLOR = '#4D9DE0';
-const WATER_CONSTRAINT_STIFFNESS = 0.9;
-const WATER_CONSTRAINT_DAMPING = 0.1;
+// Water configuration - using metaball/liquid rendering approach with Gaussian blur
+const WATER_PARTICLE_RADIUS = 12;
+const WATER_PARTICLE_SPACING = 20;
+const WATER_COLOR = 'rgba(77, 157, 224, 1)'; // Solid color for filter effect
+const WATER_BLUR_AMOUNT = 12; // Gaussian blur stdDeviation
+const WATER_CONTRAST = 20; // Color matrix alpha multiplier
+const WATER_THRESHOLD = -10; // Color matrix alpha offset
+
+// Fire configuration
+const FIRE_PARTICLE_RADIUS = 10;
+const FIRE_PARTICLE_SPACING = 15;
+const FIRE_COLORS = ['#FF4500', '#FF6347', '#FFA500', '#FFD700', '#FF8C00'];
+const MAX_FIRE_PARTICLES = 500;
+const FIRE_LIFETIME = 3000; // milliseconds before fire particle dies
+const FIRE_UPWARD_FORCE = 0.0003; // upward force per frame
+const BURN_DAMAGE_RATE = 0.02; // health reduction per frame when touching fire
+const BURN_DISTANCE = 30; // distance at which fire can burn objects
 
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const physicsCanvasRef = useRef<HTMLCanvasElement>(null);
+  const waterCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [handsDetected, setHandsDetected] = useState(0);
@@ -43,6 +56,7 @@ export default function HandTracker() {
   const [isAntigravity, setIsAntigravity] = useState(false);
   const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('solid');
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
+  const [particleCount, setParticleCount] = useState(0);
 
   // Matter.js refs
   const engineRef = useRef<Matter.Engine | null>(null);
@@ -50,9 +64,11 @@ export default function HandTracker() {
   const runnerRef = useRef<Matter.Runner | null>(null);
   const boxesRef = useRef<Matter.Body[]>([]);
   const waterParticlesRef = useRef<Matter.Body[]>([]);
-  const waterConstraintsRef = useRef<Matter.Constraint[]>([]);
+  const fireParticlesRef = useRef<Array<{ body: Matter.Body; createdAt: number; color: string }>>([]);
+  const boxHealthRef = useRef<Map<Matter.Body, number>>(new Map()); // Track health of boxes
   const groundRef = useRef<Matter.Body | null>(null);
   const wallsRef = useRef<Matter.Body[]>([]);
+  const waterAnimationRef = useRef<number | null>(null);
 
   // Gesture tracking refs
   const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -195,6 +211,66 @@ export default function HandTracker() {
     // Add static bodies to world
     Matter.World.add(engine.world, [ground, leftWall, rightWall]);
 
+    // Add fire physics and burning mechanics
+    Matter.Events.on(engine, 'beforeUpdate', () => {
+      const now = Date.now();
+
+      // Apply upward force to fire particles and remove expired ones
+      fireParticlesRef.current = fireParticlesRef.current.filter(fireParticle => {
+        const age = now - fireParticle.createdAt;
+
+        // Remove if too old
+        if (age > FIRE_LIFETIME) {
+          Matter.World.remove(engine.world, fireParticle.body);
+          return false;
+        }
+
+        // Apply upward force (fire rises)
+        const upwardForce = FIRE_UPWARD_FORCE * (1 - age / FIRE_LIFETIME); // Weaker as it ages
+        Matter.Body.applyForce(fireParticle.body, fireParticle.body.position, { x: 0, y: -upwardForce });
+
+        // Add random horizontal drift for flame effect
+        const drift = (Math.random() - 0.5) * 0.00005;
+        Matter.Body.applyForce(fireParticle.body, fireParticle.body.position, { x: drift, y: 0 });
+
+        // Fade out as it ages
+        const opacity = 1 - (age / FIRE_LIFETIME);
+        fireParticle.body.render.opacity = opacity;
+
+        return true;
+      });
+
+      // Check for burning collisions
+      fireParticlesRef.current.forEach(fireParticle => {
+        boxesRef.current.forEach(box => {
+          const dx = box.position.x - fireParticle.body.position.x;
+          const dy = box.position.y - fireParticle.body.position.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+
+          // If fire is close to box, damage it
+          if (distance < BURN_DISTANCE) {
+            const currentHealth = boxHealthRef.current.get(box) || 1.0;
+            const newHealth = currentHealth - BURN_DAMAGE_RATE;
+            boxHealthRef.current.set(box, newHealth);
+
+            // Visual indication of burning (darken the box)
+            const burnLevel = 1 - newHealth;
+            if (box.render.fillStyle) {
+              // Darken color based on burn level
+              box.render.opacity = Math.max(0.3, 1 - burnLevel);
+            }
+
+            // Remove box if health reaches 0
+            if (newHealth <= 0) {
+              Matter.World.remove(engine.world, box);
+              boxHealthRef.current.delete(box);
+              boxesRef.current = boxesRef.current.filter(b => b !== box);
+            }
+          }
+        });
+      });
+    });
+
     // Start renderer and runner
     Matter.Render.run(render);
     const runner = Matter.Runner.create();
@@ -202,10 +278,12 @@ export default function HandTracker() {
     Matter.Runner.run(runner, engine);
   };
 
-  // Create a physics box or water based on material type
+  // Create a physics box or water or fire based on material type
   const createBox = (start: { x: number; y: number }, end: { x: number; y: number }) => {
     if (currentMaterialRef.current === 'water') {
       createWater(start, end);
+    } else if (currentMaterialRef.current === 'fire') {
+      createFire(start, end);
     } else {
       createSolidBox(start, end);
     }
@@ -238,16 +316,20 @@ export default function HandTracker() {
     Matter.World.add(engineRef.current.world, box);
     boxesRef.current.push(box);
 
+    // Initialize health for this box
+    boxHealthRef.current.set(box, 1.0);
+
     // FIFO removal if exceeding max boxes
     if (boxesRef.current.length > MAX_BOXES) {
       const oldestBox = boxesRef.current.shift();
       if (oldestBox && engineRef.current) {
         Matter.World.remove(engineRef.current.world, oldestBox);
+        boxHealthRef.current.delete(oldestBox);
       }
     }
   };
 
-  // Create water blob with connected particles (soft body)
+  // Create liquid water particles (no constraints - true fluid behavior with Gaussian blur)
   const createWater = (start: { x: number; y: number }, end: { x: number; y: number }) => {
     if (!engineRef.current) return;
 
@@ -255,116 +337,157 @@ export default function HandTracker() {
     const height = Math.abs(end.y - start.y);
 
     // Minimum size validation
-    if (width < 40 || height < 40) return;
+    if (width < 30 || height < 30) return;
 
     const minX = Math.min(start.x, end.x);
-    const maxX = Math.max(start.x, end.x);
     const minY = Math.min(start.y, end.y);
-    const maxY = Math.max(start.y, end.y);
 
     // Calculate grid dimensions
-    const cols = Math.floor(width / WATER_PARTICLE_SPACING);
-    const rows = Math.floor(height / WATER_PARTICLE_SPACING);
+    const cols = Math.max(2, Math.floor(width / WATER_PARTICLE_SPACING));
+    const rows = Math.max(2, Math.floor(height / WATER_PARTICLE_SPACING));
 
-    if (cols < 2 || rows < 2) return;
+    // Check if we would exceed max particles
+    const newParticleCount = cols * rows;
+    if (waterParticlesRef.current.length + newParticleCount > MAX_WATER_PARTICLES) {
+      // Remove oldest particles to make room
+      const toRemove = Math.min(
+        waterParticlesRef.current.length,
+        (waterParticlesRef.current.length + newParticleCount) - MAX_WATER_PARTICLES
+      );
+      for (let i = 0; i < toRemove; i++) {
+        const oldParticle = waterParticlesRef.current.shift();
+        if (oldParticle && engineRef.current) {
+          Matter.World.remove(engineRef.current.world, oldParticle);
+        }
+      }
+    }
 
-    const particles: Matter.Body[][] = [];
-    const newParticles: Matter.Body[] = [];
-
-    // Create particles in a grid
+    // Create particles in a grid with slight randomness for natural look
     for (let row = 0; row < rows; row++) {
-      particles[row] = [];
       for (let col = 0; col < cols; col++) {
-        const x = minX + (width / (cols - 1)) * col;
-        const y = minY + (height / (rows - 1)) * row;
+        const x = minX + WATER_PARTICLE_SPACING * col + WATER_PARTICLE_SPACING / 2;
+        const y = minY + WATER_PARTICLE_SPACING * row + WATER_PARTICLE_SPACING / 2;
 
-        const particle = Matter.Bodies.circle(x, y, WATER_PARTICLE_SIZE, {
-          restitution: 0.1,
-          friction: 0.05,
-          frictionAir: 0.02,
-          density: 0.002,
+        // Add slight randomness to initial position
+        const randomX = x + (Math.random() - 0.5) * 4;
+        const randomY = y + (Math.random() - 0.5) * 4;
+
+        const particle = Matter.Bodies.circle(randomX, randomY, WATER_PARTICLE_RADIUS, {
+          restitution: 0.3,
+          friction: 0.0,
+          frictionAir: 0.01,
+          frictionStatic: 0,
+          density: 0.001,
+          slop: 0.5,
+          label: 'water',
           render: {
-            fillStyle: WATER_COLOR
+            visible: false // We render water separately with blur effect
           }
         });
 
-        particles[row][col] = particle;
-        newParticles.push(particle);
         Matter.World.add(engineRef.current.world, particle);
         waterParticlesRef.current.push(particle);
       }
     }
 
-    // Create constraints (springs) between adjacent particles
-    const newConstraints: Matter.Constraint[] = [];
+    setParticleCount(waterParticlesRef.current.length);
+  };
 
+  // Create fire particles with upward floating behavior
+  const createFire = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+    if (!engineRef.current) return;
+
+    const width = Math.abs(end.x - start.x);
+    const height = Math.abs(end.y - start.y);
+
+    // Minimum size validation
+    if (width < 30 || height < 30) return;
+
+    const minX = Math.min(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+
+    // Calculate grid dimensions
+    const cols = Math.max(2, Math.floor(width / FIRE_PARTICLE_SPACING));
+    const rows = Math.max(2, Math.floor(height / FIRE_PARTICLE_SPACING));
+
+    // Check if we would exceed max particles
+    const newParticleCount = cols * rows;
+    if (fireParticlesRef.current.length + newParticleCount > MAX_FIRE_PARTICLES) {
+      // Remove oldest particles to make room
+      const toRemove = Math.min(
+        fireParticlesRef.current.length,
+        (fireParticlesRef.current.length + newParticleCount) - MAX_FIRE_PARTICLES
+      );
+      for (let i = 0; i < toRemove; i++) {
+        const oldParticle = fireParticlesRef.current.shift();
+        if (oldParticle && engineRef.current) {
+          Matter.World.remove(engineRef.current.world, oldParticle.body);
+        }
+      }
+    }
+
+    // Create fire particles in a grid with randomness
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        const current = particles[row][col];
+        const x = minX + FIRE_PARTICLE_SPACING * col + FIRE_PARTICLE_SPACING / 2;
+        const y = minY + FIRE_PARTICLE_SPACING * row + FIRE_PARTICLE_SPACING / 2;
 
-        // Connect to right neighbor
-        if (col < cols - 1) {
-          const right = particles[row][col + 1];
-          const constraint = Matter.Constraint.create({
-            bodyA: current,
-            bodyB: right,
-            stiffness: WATER_CONSTRAINT_STIFFNESS,
-            damping: WATER_CONSTRAINT_DAMPING,
-            render: { visible: false }
-          });
-          Matter.World.add(engineRef.current.world, constraint);
-          waterConstraintsRef.current.push(constraint);
-          newConstraints.push(constraint);
-        }
+        // Add randomness to initial position
+        const randomX = x + (Math.random() - 0.5) * 6;
+        const randomY = y + (Math.random() - 0.5) * 6;
 
-        // Connect to bottom neighbor
-        if (row < rows - 1) {
-          const bottom = particles[row + 1][col];
-          const constraint = Matter.Constraint.create({
-            bodyA: current,
-            bodyB: bottom,
-            stiffness: WATER_CONSTRAINT_STIFFNESS,
-            damping: WATER_CONSTRAINT_DAMPING,
-            render: { visible: false }
-          });
-          Matter.World.add(engineRef.current.world, constraint);
-          waterConstraintsRef.current.push(constraint);
-          newConstraints.push(constraint);
-        }
+        // Random fire color
+        const color = FIRE_COLORS[Math.floor(Math.random() * FIRE_COLORS.length)];
 
-        // Connect to diagonal neighbors for more cohesion
-        if (row < rows - 1 && col < cols - 1) {
-          const diagonal = particles[row + 1][col + 1];
-          const constraint = Matter.Constraint.create({
-            bodyA: current,
-            bodyB: diagonal,
-            stiffness: WATER_CONSTRAINT_STIFFNESS * 0.5,
-            damping: WATER_CONSTRAINT_DAMPING,
-            render: { visible: false }
-          });
-          Matter.World.add(engineRef.current.world, constraint);
-          waterConstraintsRef.current.push(constraint);
-          newConstraints.push(constraint);
-        }
+        const particle = Matter.Bodies.circle(randomX, randomY, FIRE_PARTICLE_RADIUS, {
+          restitution: 0.1,
+          friction: 0.0,
+          frictionAir: 0.02,
+          density: 0.0005,
+          label: 'fire',
+          render: {
+            fillStyle: color
+          }
+        });
 
-        if (row < rows - 1 && col > 0) {
-          const diagonal = particles[row + 1][col - 1];
-          const constraint = Matter.Constraint.create({
-            bodyA: current,
-            bodyB: diagonal,
-            stiffness: WATER_CONSTRAINT_STIFFNESS * 0.5,
-            damping: WATER_CONSTRAINT_DAMPING,
-            render: { visible: false }
-          });
-          Matter.World.add(engineRef.current.world, constraint);
-          waterConstraintsRef.current.push(constraint);
-          newConstraints.push(constraint);
-        }
+        Matter.World.add(engineRef.current.world, particle);
+        fireParticlesRef.current.push({
+          body: particle,
+          createdAt: Date.now(),
+          color: color
+        });
       }
     }
   };
 
-  // Clear all boxes and water particles
+  // Render water particles with Gaussian blur effect (metaball technique)
+  const renderWater = useCallback(() => {
+    const waterCanvas = waterCanvasRef.current;
+    if (!waterCanvas) return;
+
+    const ctx = waterCanvas.getContext('2d');
+    if (!ctx) return;
+
+    // Clear canvas
+    ctx.clearRect(0, 0, waterCanvas.width, waterCanvas.height);
+
+    // Draw each water particle as a circle
+    ctx.fillStyle = WATER_COLOR;
+
+    for (const particle of waterParticlesRef.current) {
+      const { x, y } = particle.position;
+      const radius = WATER_PARTICLE_RADIUS * 1.8; // Slightly larger for better blending
+
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Schedule next frame
+    waterAnimationRef.current = requestAnimationFrame(renderWater);
+  }, []);
+
+  // Clear all boxes and particles
   const clearAllBoxes = () => {
     if (!engineRef.current) return;
 
@@ -372,16 +495,19 @@ export default function HandTracker() {
       Matter.World.remove(engineRef.current!.world, box);
     });
     boxesRef.current = [];
-
-    waterConstraintsRef.current.forEach(constraint => {
-      Matter.World.remove(engineRef.current!.world, constraint);
-    });
-    waterConstraintsRef.current = [];
+    boxHealthRef.current.clear();
 
     waterParticlesRef.current.forEach(particle => {
       Matter.World.remove(engineRef.current!.world, particle);
     });
     waterParticlesRef.current = [];
+
+    fireParticlesRef.current.forEach(fireParticle => {
+      Matter.World.remove(engineRef.current!.world, fireParticle.body);
+    });
+    fireParticlesRef.current = [];
+
+    setParticleCount(0);
   };
 
   useEffect(() => {
@@ -471,7 +597,7 @@ export default function HandTracker() {
 
                     // Draw preview outline
                     if (pinchStartRef.current && pinchCurrentRef.current) {
-                      ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : '#FFFFFF';
+                      ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : currentMaterialRef.current === 'fire' ? '#FF6347' : '#FFFFFF';
                       ctx.lineWidth = 2;
                       ctx.setLineDash([5, 5]);
                       const width = pinchCurrentRef.current.x - pinchStartRef.current.x;
@@ -647,6 +773,9 @@ export default function HandTracker() {
         // Initialize Matter.js physics
         initializeMatterJS();
 
+        // Start water rendering loop
+        renderWater();
+
         setIsLoading(false);
 
       } catch (err) {
@@ -666,6 +795,9 @@ export default function HandTracker() {
       if (hands) {
         hands.close();
       }
+      if (waterAnimationRef.current) {
+        cancelAnimationFrame(waterAnimationRef.current);
+      }
       if (runnerRef.current && engineRef.current) {
         Matter.Runner.stop(runnerRef.current);
       }
@@ -676,7 +808,7 @@ export default function HandTracker() {
         Matter.Engine.clear(engineRef.current);
       }
     };
-  }, []);
+  }, [renderWater]);
 
   // Function to load MediaPipe scripts dynamically
   const loadMediaPipeScripts = (): Promise<void> => {
@@ -720,6 +852,24 @@ export default function HandTracker() {
 
   return (
     <div className="relative w-full h-full flex flex-col items-center justify-center bg-black">
+      {/* SVG Filter for liquid/metaball effect */}
+      <svg style={{ position: 'absolute', width: 0, height: 0 }}>
+        <defs>
+          <filter id="liquid-filter">
+            {/* Gaussian blur to blend particles */}
+            <feGaussianBlur in="SourceGraphic" stdDeviation={WATER_BLUR_AMOUNT} result="blur" />
+            {/* Color matrix to increase contrast and create sharp edges */}
+            {/* The alpha channel is multiplied by WATER_CONTRAST and offset by WATER_THRESHOLD */}
+            <feColorMatrix
+              in="blur"
+              mode="matrix"
+              values={`1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 ${WATER_CONTRAST} ${WATER_THRESHOLD}`}
+              result="contrast"
+            />
+          </filter>
+        </defs>
+      </svg>
+
       {/* Status bar */}
       <div className="absolute top-4 left-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg">
         {isLoading ? (
@@ -731,11 +881,12 @@ export default function HandTracker() {
             <span>
               {handsDetected === 0 ? 'No hands detected' : `${handsDetected} hand${handsDetected > 1 ? 's' : ''} detected`}
             </span>
-            {isPinching && <span>🤏 Drawing</span>}
-            {isGrabbing && <span>🤏 Grabbing</span>}
-            {isAntigravity && <span className="text-purple-400 font-bold">☝️ Antigravity</span>}
+            {isPinching && <span>Drawing</span>}
+            {isGrabbing && <span>Grabbing</span>}
+            {isAntigravity && <span className="text-purple-400 font-bold">Antigravity</span>}
             <span>Boxes: {boxesRef.current.length}/{MAX_BOXES}</span>
-            <span>Water: {waterParticlesRef.current.length} particles</span>
+            <span>Water: {particleCount}/{MAX_WATER_PARTICLES}</span>
+            <span className="text-orange-400">Fire: {fireParticlesRef.current.length}/{MAX_FIRE_PARTICLES}</span>
           </div>
         )}
       </div>
@@ -813,6 +964,19 @@ export default function HandTracker() {
             >
               Water
             </button>
+            <button
+              onClick={() => {
+                setCurrentMaterial('fire');
+                currentMaterialRef.current = 'fire';
+              }}
+              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                currentMaterial === 'fire'
+                  ? 'bg-orange-600 hover:bg-orange-700'
+                  : 'bg-gray-600 hover:bg-gray-700'
+              }`}
+            >
+              Fire
+            </button>
           </div>
         )}
       </div>
@@ -839,13 +1003,28 @@ export default function HandTracker() {
         height={720}
       />
 
-      {/* Physics canvas (transparent overlay) */}
+      {/* Water canvas with liquid filter (rendered below physics) */}
+      <canvas
+        ref={waterCanvasRef}
+        className="absolute max-w-full max-h-full pointer-events-none"
+        width={1280}
+        height={720}
+        style={{
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          filter: 'url(#liquid-filter)',
+          zIndex: 1
+        }}
+      />
+
+      {/* Physics canvas (transparent overlay for solid objects) */}
       <canvas
         ref={physicsCanvasRef}
         className="absolute max-w-full max-h-full pointer-events-none"
         width={1280}
         height={720}
-        style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}
+        style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 2 }}
       />
 
       {/* Info panel */}
@@ -856,16 +1035,17 @@ export default function HandTracker() {
             onClick={clearAllBoxes}
             className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs font-semibold transition-colors"
           >
-            Clear All ({boxesRef.current.length + waterParticlesRef.current.length})
+            Clear All ({boxesRef.current.length + particleCount + fireParticlesRef.current.length})
           </button>
         </div>
         <ul className="list-disc list-inside space-y-1 text-xs">
           <li>Green = Right hand, Red = Left hand</li>
-          <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : 'water blobs'}</li>
+          <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : currentMaterial === 'water' ? 'water' : 'fire'}</li>
           <li><strong>Physics Mode:</strong> Pinch near a box to grab it, move to reposition, release pinch to throw</li>
-          <li><strong>Antigravity:</strong> Right hand points up ☝️ + Left hand faces down 👇 (both required) to reverse gravity</li>
-          <li><strong>Solid material:</strong> Creates rigid boxes that bounce and collide</li>
-          <li><strong>Water material:</strong> Creates deformable soft body blobs with fluid-like behavior</li>
+          <li><strong>Antigravity:</strong> Right hand points up + Left hand faces down (both required) to reverse gravity</li>
+          <li><strong>Solid:</strong> Rigid boxes that bounce and collide</li>
+          <li><strong>Water:</strong> Liquid particles with metaball blur effect</li>
+          <li><strong>Fire:</strong> Flame particles that float upward and burn boxes (boxes turn dark and disappear)</li>
           <li>Switch modes and materials using buttons in top-right corner</li>
         </ul>
       </div>

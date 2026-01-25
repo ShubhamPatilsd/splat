@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:dev.to)",
+      "Bash(npx typescript:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm install)",
+      "Bash(timeout /t 10 npm run dev)",
+      "Bash(npm install:*)",
+      "Bash(taskkill:*)",
+      "Bash(del \"E:\\\\splat\\\\.next\\\\dev\\\\lock\")",
+      "Bash(git add:*)"
+    ]
+  }
+}

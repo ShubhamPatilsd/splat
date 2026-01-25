@@ -84,6 +84,9 @@ export default function GestureTracker() {
   const [error, setError] = useState<string | null>(null);
   const [hands, setHands] = useState<HandData[]>([]);
   const [gestureCombos, setGestureCombos] = useState<GestureCombo[]>([]);
+  const [splatActive, setSplatActive] = useState(false);
+  const prevSplatStateRef = useRef(false);
+  const splatCooldownRef = useRef(false);
 
   // Detect gesture combinations
   const detectGestureCombos = useCallback((handData: HandData[]) => {
@@ -194,6 +197,38 @@ export default function GestureTracker() {
           timestamp: Date.now()
         });
       }
+
+      // SPLAT GESTURE: Both hands open with palms facing camera simultaneously
+      const isSplatPose = hand1.gesture.isOpen && hand2.gesture.isOpen &&
+                          hand1.gesture.isPalmFacingCamera && hand2.gesture.isPalmFacingCamera;
+
+      // Detect onset (transition from not-splat to splat) with cooldown
+      if (isSplatPose && !prevSplatStateRef.current && !splatCooldownRef.current) {
+        // Trigger splat!
+        setSplatActive(true);
+        splatCooldownRef.current = true;
+
+        // Reset splat visual after animation
+        setTimeout(() => {
+          setSplatActive(false);
+        }, 500);
+
+        // Cooldown to prevent rapid re-triggering
+        setTimeout(() => {
+          splatCooldownRef.current = false;
+        }, 800);
+
+        combos.push({
+          name: 'SPLAT! 💥',
+          active: true,
+          timestamp: Date.now()
+        });
+      }
+
+      prevSplatStateRef.current = isSplatPose;
+    } else {
+      // Reset splat state when not detecting 2 hands
+      prevSplatStateRef.current = false;
     }
 
     setGestureCombos(combos);
@@ -513,6 +548,44 @@ export default function GestureTracker() {
         </div>
       )}
 
+      {/* SPLAT Visual Feedback */}
+      {splatActive && (
+        <div className="absolute inset-0 z-40 pointer-events-none flex items-center justify-center animate-splat-flash">
+          <div className="text-center">
+            <div className="text-9xl font-black text-white drop-shadow-[0_0_60px_rgba(255,255,0,1)] animate-splat-scale">
+              SPLAT!
+            </div>
+            <div className="text-6xl mt-4">💥✋✋💥</div>
+          </div>
+          <div className="absolute inset-0 bg-gradient-radial from-yellow-400/40 via-orange-500/20 to-transparent animate-splat-ring" />
+        </div>
+      )}
+
+      <style jsx>{`
+        @keyframes splat-flash {
+          0% { background-color: rgba(255, 255, 0, 0.3); }
+          100% { background-color: transparent; }
+        }
+        @keyframes splat-scale {
+          0% { transform: scale(0.5); opacity: 0; }
+          50% { transform: scale(1.2); opacity: 1; }
+          100% { transform: scale(1); opacity: 0; }
+        }
+        @keyframes splat-ring {
+          0% { transform: scale(0.5); opacity: 0.8; }
+          100% { transform: scale(2); opacity: 0; }
+        }
+        .animate-splat-flash {
+          animation: splat-flash 0.5s ease-out forwards;
+        }
+        .animate-splat-scale {
+          animation: splat-scale 0.5s ease-out forwards;
+        }
+        .animate-splat-ring {
+          animation: splat-ring 0.5s ease-out forwards;
+        }
+      `}</style>
+
       {/* Main Content Grid */}
       <div className="absolute inset-0 pt-24 pb-6 px-6 grid grid-cols-3 gap-6">
         {/* Left Column - Camera Feed */}
@@ -547,10 +620,15 @@ export default function GestureTracker() {
               )}
             </div>
 
-            {/* Radial Menu Instructions */}
+            {/* Gesture Instructions */}
             <div className="mt-3 pt-3 border-t border-gray-700">
               <div className="text-xs text-gray-400 space-y-1">
-                <p className="font-semibold text-purple-400 mb-2">🎯 Radial Menu Controls:</p>
+                <p className="font-semibold text-yellow-400 mb-2">💥 SPLAT Gesture:</p>
+                <p>• Show <span className="text-white font-semibold">BOTH HANDS</span> with open palms facing the camera</p>
+                <p>• Quick, simultaneous motion - like pushing or saying "stop!"</p>
+                <p>• Look for the <span className="text-yellow-400">PALM FORWARD</span> badge on each hand</p>
+
+                <p className="font-semibold text-purple-400 mt-3 mb-2">🎯 Radial Menu Controls:</p>
                 <p>• Show your <span className="text-red-400 font-semibold">LEFT HAND</span> with palm open (all fingers spread)</p>
                 <p>• Radial menu appears on your palm center ({Math.round(MENU_END_ANGLE - MENU_START_ANGLE)}° range, {menuItemsConfig.length} segments)</p>
                 <p>• <span className="text-yellow-400 font-semibold">Rotate your wrist left/right</span> to select tools</p>
@@ -586,6 +664,11 @@ export default function GestureTracker() {
                   {hand.gesture.isFist && (
                     <span className="px-2 py-1 bg-purple-600 rounded text-xs font-semibold text-white">
                       FIST
+                    </span>
+                  )}
+                  {hand.gesture.isPalmFacingCamera && (
+                    <span className="px-2 py-1 bg-yellow-600 rounded text-xs font-semibold text-white">
+                      PALM FORWARD
                     </span>
                   )}
                 </div>
