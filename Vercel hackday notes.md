@@ -1,5 +1,5 @@
 
-*gesture mapping*
+**GESTURE MAPPING**
 
 - SWAPPING BETWEEN PHYSICS AND DRAWING MODE IS wakanda forever
 
@@ -16,5 +16,15 @@ physics mode:
 - splat with both hands does gaussian splat
 - pointing with right index while left hand is posed in certain way changes gravity
 
-- Collaboraiton w multiple ppl squares
+
+**FEATURES**
+
+- Collaboration w multiple ppl squares
+
+
+**BUGS**
+
+- when second hand enters frame box is set
+- pinch detection inconsistent in some cases
+
 
