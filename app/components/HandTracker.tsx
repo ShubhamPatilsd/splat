@@ -21,6 +21,9 @@ const MAX_BOXES = 20;
 // Material types
 type MaterialType = 'solid' | 'water';
 
+// Interaction modes
+type InteractionMode = 'drawing' | 'physics';
+
 // Water blob configuration
 const WATER_PARTICLE_SIZE = 15;
 const WATER_PARTICLE_SPACING = 25; // spacing between particles in grid
@@ -36,7 +39,9 @@ export default function HandTracker() {
   const [error, setError] = useState<string | null>(null);
   const [handsDetected, setHandsDetected] = useState(0);
   const [isPinching, setIsPinching] = useState(false);
+  const [isGrabbing, setIsGrabbing] = useState(false);
   const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('solid');
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
 
   // Matter.js refs
   const engineRef = useRef<Matter.Engine | null>(null);
@@ -52,6 +57,12 @@ export default function HandTracker() {
   const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
   const pinchCurrentRef = useRef<{ x: number; y: number } | null>(null);
   const currentMaterialRef = useRef<MaterialType>('solid');
+  const interactionModeRef = useRef<InteractionMode>('drawing');
+
+  // Throwing/grabbing refs
+  const grabbedBoxRef = useRef<Matter.Body | null>(null);
+  const previousGrabPosRef = useRef<{ x: number; y: number } | null>(null);
+  const grabVelocityRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
   // Helper function to calculate Euclidean distance
   const calculateDistance = (point1: { x: number; y: number }, point2: { x: number; y: number }) => {
@@ -75,6 +86,25 @@ export default function HandTracker() {
     };
 
     return { isPinchActive, position };
+  };
+
+  // Find the closest box to a position
+  const findClosestBox = (position: { x: number; y: number }, maxDistance: number = 100) => {
+    let closestBox: Matter.Body | null = null;
+    let minDistance = maxDistance;
+
+    boxesRef.current.forEach(box => {
+      const dx = box.position.x - position.x;
+      const dy = box.position.y - position.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < minDistance) {
+        minDistance = distance;
+        closestBox = box;
+      }
+    });
+
+    return closestBox;
   };
 
   // Initialize Matter.js physics engine
@@ -382,40 +412,92 @@ export default function HandTracker() {
 
               // Gesture detection for first hand
               if (i === 0) {
-                const { isPinchActive, position } = detectPinchGesture(landmarks);
+                const { isPinchActive, position: pinchPosition } = detectPinchGesture(landmarks);
 
-                if (isPinchActive) {
-                  if (!pinchStartRef.current) {
-                    // Start of pinch
-                    pinchStartRef.current = position;
-                    setIsPinching(true);
-                  }
-                  // Update current position while pinching
-                  pinchCurrentRef.current = position;
+                // DRAWING MODE: Use pinch for drawing
+                if (interactionModeRef.current === 'drawing') {
+                  if (isPinchActive) {
+                    if (!pinchStartRef.current) {
+                      // Start of pinch
+                      pinchStartRef.current = pinchPosition;
+                      setIsPinching(true);
+                    }
+                    // Update current position while pinching
+                    pinchCurrentRef.current = pinchPosition;
 
-                  // Draw preview outline
-                  if (pinchStartRef.current && pinchCurrentRef.current) {
-                    ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : '#FFFFFF';
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([5, 5]);
-                    const width = pinchCurrentRef.current.x - pinchStartRef.current.x;
-                    const height = pinchCurrentRef.current.y - pinchStartRef.current.y;
-                    ctx.strokeRect(
-                      pinchStartRef.current.x,
-                      pinchStartRef.current.y,
-                      width,
-                      height
-                    );
-                    ctx.setLineDash([]);
+                    // Draw preview outline
+                    if (pinchStartRef.current && pinchCurrentRef.current) {
+                      ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : '#FFFFFF';
+                      ctx.lineWidth = 2;
+                      ctx.setLineDash([5, 5]);
+                      const width = pinchCurrentRef.current.x - pinchStartRef.current.x;
+                      const height = pinchCurrentRef.current.y - pinchStartRef.current.y;
+                      ctx.strokeRect(
+                        pinchStartRef.current.x,
+                        pinchStartRef.current.y,
+                        width,
+                        height
+                      );
+                      ctx.setLineDash([]);
+                    }
+                  } else {
+                    // Release pinch
+                    if (pinchStartRef.current && pinchCurrentRef.current) {
+                      createBox(pinchStartRef.current, pinchCurrentRef.current);
+                    }
+                    pinchStartRef.current = null;
+                    pinchCurrentRef.current = null;
+                    setIsPinching(false);
                   }
-                } else {
-                  // Release pinch
-                  if (pinchStartRef.current && pinchCurrentRef.current) {
-                    createBox(pinchStartRef.current, pinchCurrentRef.current);
+                }
+
+                // PHYSICS MODE: Use pinch for grabbing/throwing
+                if (interactionModeRef.current === 'physics') {
+                  if (isPinchActive) {
+                    // Try to grab a box if not already holding one
+                    if (!grabbedBoxRef.current) {
+                      const closestBox = findClosestBox(pinchPosition, 80);
+                      if (closestBox) {
+                        grabbedBoxRef.current = closestBox;
+                        Matter.Body.setStatic(closestBox, true);
+                        previousGrabPosRef.current = pinchPosition;
+                        setIsGrabbing(true);
+                      }
+                    } else {
+                      // Move the grabbed box
+                      const box = grabbedBoxRef.current;
+                      Matter.Body.setPosition(box, { x: pinchPosition.x, y: pinchPosition.y });
+
+                      // Calculate velocity for throwing
+                      if (previousGrabPosRef.current) {
+                        grabVelocityRef.current = {
+                          x: (pinchPosition.x - previousGrabPosRef.current.x) * 0.5,
+                          y: (pinchPosition.y - previousGrabPosRef.current.y) * 0.5
+                        };
+                      }
+                      previousGrabPosRef.current = pinchPosition;
+
+                      // Draw visual indicator for grabbed box
+                      ctx.strokeStyle = '#FFFF00';
+                      ctx.lineWidth = 3;
+                      ctx.beginPath();
+                      ctx.arc(pinchPosition.x, pinchPosition.y, 50, 0, Math.PI * 2);
+                      ctx.stroke();
+                    }
+                  } else {
+                    // Release pinch - throw the box
+                    if (grabbedBoxRef.current) {
+                      Matter.Body.setStatic(grabbedBoxRef.current, false);
+                      Matter.Body.setVelocity(grabbedBoxRef.current, {
+                        x: grabVelocityRef.current.x,
+                        y: grabVelocityRef.current.y
+                      });
+                      grabbedBoxRef.current = null;
+                      previousGrabPosRef.current = null;
+                      grabVelocityRef.current = { x: 0, y: 0 };
+                      setIsGrabbing(false);
+                    }
                   }
-                  pinchStartRef.current = null;
-                  pinchCurrentRef.current = null;
-                  setIsPinching(false);
                 }
               }
             }
@@ -425,6 +507,15 @@ export default function HandTracker() {
             pinchStartRef.current = null;
             pinchCurrentRef.current = null;
             setIsPinching(false);
+
+            // Release grabbed box if no hands detected
+            if (grabbedBoxRef.current) {
+              Matter.Body.setStatic(grabbedBoxRef.current, false);
+              grabbedBoxRef.current = null;
+              previousGrabPosRef.current = null;
+              grabVelocityRef.current = { x: 0, y: 0 };
+              setIsGrabbing(false);
+            }
           }
 
           ctx.restore();
@@ -530,44 +621,89 @@ export default function HandTracker() {
             <span>
               {handsDetected === 0 ? 'No hands detected' : `${handsDetected} hand${handsDetected > 1 ? 's' : ''} detected`}
             </span>
-            {isPinching && <span>🤏 Pinching</span>}
+            {isPinching && <span>🤏 Drawing</span>}
+            {isGrabbing && <span>🤏 Grabbing</span>}
             <span>Boxes: {boxesRef.current.length}/{MAX_BOXES}</span>
             <span>Water: {waterParticlesRef.current.length} particles</span>
           </div>
         )}
       </div>
 
-      {/* Material selector */}
-      <div className="absolute top-4 right-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg">
+      {/* Mode and Material selectors */}
+      <div className="absolute top-4 right-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg space-y-2">
+        {/* Mode selector */}
         <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold">Material:</span>
+          <span className="text-sm font-semibold">Mode:</span>
           <button
             onClick={() => {
-              setCurrentMaterial('solid');
-              currentMaterialRef.current = 'solid';
+              setInteractionMode('drawing');
+              interactionModeRef.current = 'drawing';
+              // Release any grabbed box when switching modes
+              if (grabbedBoxRef.current) {
+                Matter.Body.setStatic(grabbedBoxRef.current, false);
+                grabbedBoxRef.current = null;
+                setIsGrabbing(false);
+              }
             }}
             className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-              currentMaterial === 'solid'
-                ? 'bg-blue-600 hover:bg-blue-700'
+              interactionMode === 'drawing'
+                ? 'bg-green-600 hover:bg-green-700'
                 : 'bg-gray-600 hover:bg-gray-700'
             }`}
           >
-            Solid
+            Drawing
           </button>
           <button
             onClick={() => {
-              setCurrentMaterial('water');
-              currentMaterialRef.current = 'water';
+              setInteractionMode('physics');
+              interactionModeRef.current = 'physics';
+              // Reset drawing state when switching modes
+              pinchStartRef.current = null;
+              pinchCurrentRef.current = null;
+              setIsPinching(false);
             }}
             className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-              currentMaterial === 'water'
-                ? 'bg-blue-600 hover:bg-blue-700'
+              interactionMode === 'physics'
+                ? 'bg-green-600 hover:bg-green-700'
                 : 'bg-gray-600 hover:bg-gray-700'
             }`}
           >
-            Water
+            Physics
           </button>
         </div>
+
+        {/* Material selector - only show in drawing mode */}
+        {interactionMode === 'drawing' && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold">Material:</span>
+            <button
+              onClick={() => {
+                setCurrentMaterial('solid');
+                currentMaterialRef.current = 'solid';
+              }}
+              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                currentMaterial === 'solid'
+                  ? 'bg-blue-600 hover:bg-blue-700'
+                  : 'bg-gray-600 hover:bg-gray-700'
+              }`}
+            >
+              Solid
+            </button>
+            <button
+              onClick={() => {
+                setCurrentMaterial('water');
+                currentMaterialRef.current = 'water';
+              }}
+              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                currentMaterial === 'water'
+                  ? 'bg-blue-600 hover:bg-blue-700'
+                  : 'bg-gray-600 hover:bg-gray-700'
+              }`}
+            >
+              Water
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Loading spinner */}
@@ -614,12 +750,11 @@ export default function HandTracker() {
         </div>
         <ul className="list-disc list-inside space-y-1 text-xs">
           <li>Green = Right hand, Red = Left hand</li>
-          <li>Pinch thumb and index finger together to start drawing</li>
-          <li>Drag while pinching to define area size</li>
-          <li>Release to create physics-enabled objects</li>
-          <li><strong>Solid mode:</strong> Creates rigid boxes that bounce and collide</li>
-          <li><strong>Water mode:</strong> Creates fluid particles with cohesion, surface tension, and flow behavior</li>
-          <li>Switch materials using buttons in top-right corner</li>
+          <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : 'water blobs'}</li>
+          <li><strong>Physics Mode:</strong> Pinch near a box to grab it, move to reposition, release pinch to throw</li>
+          <li><strong>Solid material:</strong> Creates rigid boxes that bounce and collide</li>
+          <li><strong>Water material:</strong> Creates deformable soft body blobs with fluid-like behavior</li>
+          <li>Switch modes and materials using buttons in top-right corner</li>
         </ul>
       </div>
     </div>
