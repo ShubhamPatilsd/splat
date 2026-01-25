@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Matter from 'matter-js';
 
 // TypeScript declarations for MediaPipe libraries
 declare global {
@@ -13,12 +14,151 @@ declare global {
   }
 }
 
+// Constants
+const BOX_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F'];
+const MAX_BOXES = 20;
+
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const physicsCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [handsDetected, setHandsDetected] = useState(0);
+  const [isPinching, setIsPinching] = useState(false);
+
+  // Matter.js refs
+  const engineRef = useRef<Matter.Engine | null>(null);
+  const renderRef = useRef<Matter.Render | null>(null);
+  const runnerRef = useRef<Matter.Runner | null>(null);
+  const boxesRef = useRef<Matter.Body[]>([]);
+  const groundRef = useRef<Matter.Body | null>(null);
+  const wallsRef = useRef<Matter.Body[]>([]);
+
+  // Gesture tracking refs
+  const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const pinchCurrentRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Helper function to calculate Euclidean distance
+  const calculateDistance = (point1: { x: number; y: number }, point2: { x: number; y: number }) => {
+    return Math.sqrt(Math.pow(point2.x - point1.x, 2) + Math.pow(point2.y - point1.y, 2));
+  };
+
+  // Detect pinch gesture and return state and position
+  const detectPinchGesture = (landmarks: any) => {
+    const thumbTip = landmarks[4];
+    const indexTip = landmarks[8];
+
+    const distance = calculateDistance(
+      { x: thumbTip.x, y: thumbTip.y },
+      { x: indexTip.x, y: indexTip.y }
+    );
+
+    const isPinchActive = distance < 0.05;
+    const position = {
+      x: indexTip.x * 1280,
+      y: indexTip.y * 720
+    };
+
+    return { isPinchActive, position };
+  };
+
+  // Initialize Matter.js physics engine
+  const initializeMatterJS = () => {
+    const physicsCanvas = physicsCanvasRef.current;
+    if (!physicsCanvas) return;
+
+    // Create engine
+    const engine = Matter.Engine.create();
+    engine.gravity.y = 0.5;
+    engineRef.current = engine;
+
+    // Create renderer
+    const render = Matter.Render.create({
+      canvas: physicsCanvas,
+      engine: engine,
+      options: {
+        width: 1280,
+        height: 720,
+        wireframes: false,
+        background: 'transparent'
+      }
+    });
+    renderRef.current = render;
+
+    // Create ground
+    const ground = Matter.Bodies.rectangle(640, 710, 1280, 20, {
+      isStatic: true,
+      render: { fillStyle: '#444444' }
+    });
+    groundRef.current = ground;
+
+    // Create walls
+    const leftWall = Matter.Bodies.rectangle(0, 360, 20, 720, {
+      isStatic: true,
+      render: { fillStyle: '#444444' }
+    });
+    const rightWall = Matter.Bodies.rectangle(1280, 360, 20, 720, {
+      isStatic: true,
+      render: { fillStyle: '#444444' }
+    });
+    wallsRef.current = [leftWall, rightWall];
+
+    // Add static bodies to world
+    Matter.World.add(engine.world, [ground, leftWall, rightWall]);
+
+    // Start renderer and runner
+    Matter.Render.run(render);
+    const runner = Matter.Runner.create();
+    runnerRef.current = runner;
+    Matter.Runner.run(runner, engine);
+  };
+
+  // Create a physics box
+  const createBox = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+    if (!engineRef.current) return;
+
+    const width = Math.abs(end.x - start.x);
+    const height = Math.abs(end.y - start.y);
+
+    // Minimum size validation
+    if (width < 20 || height < 20) return;
+
+    const centerX = (start.x + end.x) / 2;
+    const centerY = (start.y + end.y) / 2;
+
+    // Random color
+    const color = BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)];
+
+    // Create Matter.js body
+    const box = Matter.Bodies.rectangle(centerX, centerY, width, height, {
+      restitution: 0.6,
+      friction: 0.1,
+      render: { fillStyle: color }
+    });
+
+    // Add to world
+    Matter.World.add(engineRef.current.world, box);
+    boxesRef.current.push(box);
+
+    // FIFO removal if exceeding max boxes
+    if (boxesRef.current.length > MAX_BOXES) {
+      const oldestBox = boxesRef.current.shift();
+      if (oldestBox && engineRef.current) {
+        Matter.World.remove(engineRef.current.world, oldestBox);
+      }
+    }
+  };
+
+  // Clear all boxes
+  const clearAllBoxes = () => {
+    if (!engineRef.current) return;
+
+    boxesRef.current.forEach(box => {
+      Matter.World.remove(engineRef.current!.world, box);
+    });
+    boxesRef.current = [];
+  };
 
   useEffect(() => {
     let camera: any = null;
@@ -88,9 +228,52 @@ export default function HandTracker() {
                   radius: 3
                 }
               );
+
+              // Gesture detection for first hand
+              if (i === 0) {
+                const { isPinchActive, position } = detectPinchGesture(landmarks);
+
+                if (isPinchActive) {
+                  if (!pinchStartRef.current) {
+                    // Start of pinch
+                    pinchStartRef.current = position;
+                    setIsPinching(true);
+                  }
+                  // Update current position while pinching
+                  pinchCurrentRef.current = position;
+
+                  // Draw preview outline
+                  if (pinchStartRef.current && pinchCurrentRef.current) {
+                    ctx.strokeStyle = '#FFFFFF';
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([5, 5]);
+                    const width = pinchCurrentRef.current.x - pinchStartRef.current.x;
+                    const height = pinchCurrentRef.current.y - pinchStartRef.current.y;
+                    ctx.strokeRect(
+                      pinchStartRef.current.x,
+                      pinchStartRef.current.y,
+                      width,
+                      height
+                    );
+                    ctx.setLineDash([]);
+                  }
+                } else {
+                  // Release pinch
+                  if (pinchStartRef.current && pinchCurrentRef.current) {
+                    createBox(pinchStartRef.current, pinchCurrentRef.current);
+                  }
+                  pinchStartRef.current = null;
+                  pinchCurrentRef.current = null;
+                  setIsPinching(false);
+                }
+              }
             }
           } else {
             setHandsDetected(0);
+            // Reset pinch state if no hands detected
+            pinchStartRef.current = null;
+            pinchCurrentRef.current = null;
+            setIsPinching(false);
           }
 
           ctx.restore();
@@ -108,6 +291,10 @@ export default function HandTracker() {
         });
 
         await camera.start();
+
+        // Initialize Matter.js physics
+        initializeMatterJS();
+
         setIsLoading(false);
 
       } catch (err) {
@@ -126,6 +313,15 @@ export default function HandTracker() {
       }
       if (hands) {
         hands.close();
+      }
+      if (runnerRef.current && engineRef.current) {
+        Matter.Runner.stop(runnerRef.current);
+      }
+      if (renderRef.current) {
+        Matter.Render.stop(renderRef.current);
+      }
+      if (engineRef.current) {
+        Matter.Engine.clear(engineRef.current);
       }
     };
   }, []);
@@ -179,9 +375,13 @@ export default function HandTracker() {
         ) : error ? (
           <span className="text-red-400">{error}</span>
         ) : (
-          <span>
-            {handsDetected === 0 ? 'No hands detected' : `${handsDetected} hand${handsDetected > 1 ? 's' : ''} detected`}
-          </span>
+          <div className="flex items-center gap-4">
+            <span>
+              {handsDetected === 0 ? 'No hands detected' : `${handsDetected} hand${handsDetected > 1 ? 's' : ''} detected`}
+            </span>
+            {isPinching && <span>🤏 Pinching</span>}
+            <span>Boxes: {boxesRef.current.length}/{MAX_BOXES}</span>
+          </div>
         )}
       </div>
 
@@ -207,13 +407,33 @@ export default function HandTracker() {
         height={720}
       />
 
+      {/* Physics canvas (transparent overlay) */}
+      <canvas
+        ref={physicsCanvasRef}
+        className="absolute max-w-full max-h-full pointer-events-none"
+        width={1280}
+        height={720}
+        style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}
+      />
+
       {/* Info panel */}
       <div className="absolute bottom-4 left-4 right-4 bg-black/70 text-white p-4 rounded-lg text-sm">
-        <p className="mb-2 font-semibold">Hand Tracking Info:</p>
+        <div className="flex justify-between items-start mb-2">
+          <p className="font-semibold">Hand Tracking Info:</p>
+          <button
+            onClick={clearAllBoxes}
+            className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs font-semibold transition-colors"
+          >
+            Clear Boxes ({boxesRef.current.length})
+          </button>
+        </div>
         <ul className="list-disc list-inside space-y-1 text-xs">
           <li>Green = Right hand, Red = Left hand</li>
-          <li>21 landmarks tracked per hand</li>
-          <li>Shows hand skeleton and joint positions</li>
+          <li>Pinch thumb and index finger together to start drawing</li>
+          <li>Drag while pinching to define box size</li>
+          <li>Release to create a physics-enabled box</li>
+          <li>Boxes fall and collide with realistic physics</li>
+          <li>Maximum 20 boxes (oldest removed automatically)</li>
         </ul>
       </div>
     </div>
