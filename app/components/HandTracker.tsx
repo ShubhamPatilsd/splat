@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Matter from 'matter-js';
 import * as THREE from 'three';
-import { detectKnucklesTogetherGesture, HandLandmark, Landmark } from '../utils/gestureDetection';
+import { detectKnucklesTogetherGesture, HandLandmark, Landmark, normalizeToScreen } from '../utils/gestureDetection';
 
 // TypeScript declarations for MediaPipe libraries
 declare global {
@@ -149,6 +149,12 @@ export default function HandTracker() {
   // Pending drawings (drawing mode only; converted to physics when switching to physics)
   const drawingsRef = useRef<PendingDrawing[]>([]);
 
+  // Drawing refs (Restored from previous implementation)
+  const drawingStrokesRef = useRef<Array<{ x: number, y: number, color: string }[]>>([]);
+  const currentStrokeRef = useRef<{ x: number, y: number, color: string }[]>([]);
+  const isDrawingRef = useRef(false); // Whether currently actively drawing a stroke
+  const isIsAnalyzingRef = useRef(false); // Ref for analysis state to avoid closure issues in loop
+
   // Knuckles-together mode switch refs
   const knucklesCooldownRef = useRef(false);
   const prevKnucklesTogetherRef = useRef(false);
@@ -181,7 +187,7 @@ export default function HandTracker() {
       { x: indexTip.x, y: indexTip.y }
     );
 
-    const isPinchActive = distance < 0.05;
+    const isPinchActive = distance < 0.08;
     // Lower threshold for "ready to draw" vs "active pinch" if needed, 
     // but here we return raw distance mostly or check strict threshold.
     // We will use raw distance in the loop for drawing sensitivity.
@@ -204,7 +210,7 @@ export default function HandTracker() {
       { x: ringTip.x, y: ringTip.y }
     );
 
-    return distance < 0.05;
+    return distance < 0.08;
   };
 
   // Detect pointing up gesture (index finger pointing upward)
@@ -1544,8 +1550,8 @@ export default function HandTracker() {
           <div className="flex items-center justify-between gap-2">
             <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Mode</span>
             <span className={`shrink-0 px-2.5 py-0.5 rounded-full text-xs font-medium ${interactionMode === 'drawing'
-                ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30'
-                : 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30'
+              ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30'
+              : 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30'
               }`}>
               {interactionMode === 'drawing' ? 'Drawing' : 'Physics'}
             </span>
@@ -1569,10 +1575,10 @@ export default function HandTracker() {
                     currentMaterialRef.current = id;
                   }}
                   className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${currentMaterial === id
-                      ? id === 'fire'
-                        ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30'
-                        : 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30'
-                      : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
+                    ? id === 'fire'
+                      ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30'
+                      : 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30'
+                    : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
                     }`}
                 >
                   {label}
@@ -1587,8 +1593,8 @@ export default function HandTracker() {
                     solidStyleRef.current = 'color';
                   }}
                   className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${solidStyle === 'color'
-                      ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30'
-                      : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
+                    ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30'
+                    : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
                     }`}
                 >
                   Color
@@ -1599,8 +1605,8 @@ export default function HandTracker() {
                     solidStyleRef.current = 'wood';
                   }}
                   className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${solidStyle === 'wood'
-                      ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30'
-                      : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
+                    ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30'
+                    : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
                     }`}
                 >
                   Wood

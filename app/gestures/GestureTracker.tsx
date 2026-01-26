@@ -338,13 +338,15 @@ export default function GestureTracker() {
           const detectedHands: HandData[] = [];
 
           if (results.multiHandLandmarks && results.multiHandedness) {
+            let rightHandDrawingData: { pinch: any, position: { x: number, y: number } } | null = null;
+
             for (let i = 0; i < results.multiHandLandmarks.length; i++) {
               const landmarks: Landmark[] = results.multiHandLandmarks[i];
-              const handedness = results.multiHandedness[i].label;
-              const isRightHand = handedness === 'Right';
+              const handedness = results.multiHandedness[i];
+              const isRightHand = handedness.label === 'Right';
 
               const gesture = analyzeGesture(landmarks);
-              detectedHands.push({ gesture, handedness });
+              detectedHands.push({ gesture, handedness: handedness.label });
 
               // Draw hand
               window.drawConnectors(
@@ -389,9 +391,8 @@ export default function GestureTracker() {
                 }
               });
 
-              // DRAWING MODE: Handle drawing with right hand pinch
+              // CAPTURE RIGHT HAND DATA FOR DRAWING (Processed after loop)
               if (isDrawingModeRef.current && isRightHand) {
-                // Check for thumb+index pinch specifically
                 const thumbIndexPinch = gesture.pinches.find(
                   p => p.fingers.includes('thumb') && p.fingers.includes('index')
                 );
@@ -402,70 +403,7 @@ export default function GestureTracker() {
                     canvas.width,
                     canvas.height
                   );
-
-                  // ALWAYS show circle indicator when thumb+index are detected together
-                  const circleRadius = 20 + (thumbIndexPinch.strength * 15);
-
-                  // Only draw/active if pinch strength is sufficient (slightly buffered)
-                  // User Request: "draw whenever the circle shows up"
-                  // Since the circle shows up whenever thumbIndexPinch exists, we should use that condition directly.
-                  // Or use a very low threshold if needed, but existing detection likely already handles noise.
-                  const isReadyToDraw = true; // thumbIndexPinch exists, so we draw
-
-                  // Draw pulsing circle
-                  ctx.beginPath();
-                  ctx.arc(screenPos.x, screenPos.y, circleRadius, 0, 2 * Math.PI);
-                  ctx.strokeStyle = isReadyToDraw ? currentColorRef.current : '#FFFF00'; // Yellow if not quite pinching hard enough
-                  ctx.lineWidth = isReadyToDraw ? 5 : 2;
-                  ctx.stroke();
-
-                  // Inner filled circle
-                  ctx.beginPath();
-                  ctx.arc(screenPos.x, screenPos.y, 8, 0, 2 * Math.PI);
-                  ctx.fillStyle = currentColorRef.current;
-                  ctx.fill();
-
-                  // DRAWING LOGIC
-                  if (isReadyToDraw) {
-                    if (!isPinchingRef.current) {
-                      // Start new stroke
-                      isPinchingRef.current = true;
-                      currentStrokeRef.current = [{ x: screenPos.x, y: screenPos.y, color: currentColorRef.current }];
-                    } else {
-                      // Continue stroke - add point every frame while pinching
-                      currentStrokeRef.current.push({ x: screenPos.x, y: screenPos.y, color: currentColorRef.current });
-                    }
-
-                    // Add "DRAWING" text indicator
-                    ctx.font = 'bold 16px sans-serif';
-                    ctx.fillStyle = '#FFFFFF';
-                    ctx.strokeStyle = '#000000';
-                    ctx.lineWidth = 4;
-                    ctx.strokeText('DRAWING', screenPos.x, screenPos.y - 40);
-                    ctx.fillText('DRAWING', screenPos.x, screenPos.y - 40);
-                  } else {
-                    // Show "READY" when circle appears but not drawing yet
-                    ctx.font = 'bold 14px sans-serif';
-                    ctx.fillStyle = '#FFFF00';
-                    ctx.strokeStyle = '#000000';
-                    ctx.lineWidth = 3;
-                    ctx.strokeText('PINCH', screenPos.x, screenPos.y - 35);
-                    ctx.fillText('PINCH', screenPos.x, screenPos.y - 35);
-                  }
-                } else if (isPinchingRef.current) {
-                  // End stroke when pinch is released
-                  isPinchingRef.current = false;
-                  if (currentStrokeRef.current.length > 1) {
-                    drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
-                    currentStrokeRef.current = [];
-                  }
-                }
-              } else if (isPinchingRef.current) {
-                // End stroke if hand lost or mode changed
-                isPinchingRef.current = false;
-                if (currentStrokeRef.current.length > 1) {
-                  drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
-                  currentStrokeRef.current = [];
+                  rightHandDrawingData = { pinch: thumbIndexPinch, position: screenPos };
                 }
               }
 
@@ -734,6 +672,60 @@ export default function GestureTracker() {
                 ctx.strokeStyle = '#FFFF00';
                 ctx.lineWidth = 3;
                 ctx.stroke();
+              }
+            }
+
+            // PROCESS DRAWING LOGIC (Once per frame)
+            if (isDrawingModeRef.current) {
+              if (rightHandDrawingData) {
+                const { pinch, position: screenPos } = rightHandDrawingData;
+                const circleRadius = 20 + (pinch.strength * 15);
+
+                // Render cursor
+                ctx.beginPath();
+                ctx.arc(screenPos.x, screenPos.y, circleRadius, 0, 2 * Math.PI);
+                ctx.strokeStyle = currentColorRef.current;
+                ctx.lineWidth = 5;
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.arc(screenPos.x, screenPos.y, 8, 0, 2 * Math.PI);
+                ctx.fillStyle = currentColorRef.current;
+                ctx.fill();
+
+                // Start/Continue Stroke
+                if (!isPinchingRef.current) {
+                  isPinchingRef.current = true;
+                  currentStrokeRef.current = [{ x: screenPos.x, y: screenPos.y, color: currentColorRef.current }];
+                } else {
+                  currentStrokeRef.current.push({ x: screenPos.x, y: screenPos.y, color: currentColorRef.current });
+                }
+
+                ctx.font = 'bold 16px sans-serif';
+                ctx.fillStyle = '#FFFFFF';
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 4;
+                ctx.strokeText('DRAWING', screenPos.x, screenPos.y - 40);
+                ctx.fillText('DRAWING', screenPos.x, screenPos.y - 40);
+
+              } else {
+                // Right hand not pinching or not present -> End stroke if active
+                if (isPinchingRef.current) {
+                  isPinchingRef.current = false;
+                  if (currentStrokeRef.current.length > 1) {
+                    drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
+                  }
+                  currentStrokeRef.current = [];
+                }
+              }
+            } else {
+              // Not in drawing mode -> End stroke if active
+              if (isPinchingRef.current) {
+                isPinchingRef.current = false;
+                if (currentStrokeRef.current.length > 1) {
+                  drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
+                }
+                currentStrokeRef.current = [];
               }
             }
 

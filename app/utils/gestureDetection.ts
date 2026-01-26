@@ -88,7 +88,7 @@ export function detectPinch(
   landmarks: Landmark[],
   finger1: HandLandmark,
   finger2: HandLandmark,
-  threshold: number = 0.05
+  threshold: number = 0.08 // Increased from 0.05 for better sensitivity
 ): PinchGesture {
   const tip1 = landmarks[finger1];
   const tip2 = landmarks[finger2];
