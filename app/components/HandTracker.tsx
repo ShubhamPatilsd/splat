@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Matter from 'matter-js';
 import * as THREE from 'three';
-import { detectWakandaForeverGesture, Landmark } from '../utils/gestureDetection';
+import { detectWakandaForeverGesture, Landmark, normalizeToScreen } from '../utils/gestureDetection';
 
 // TypeScript declarations for MediaPipe libraries
 declare global {
@@ -142,6 +142,12 @@ export default function HandTracker() {
   const prevSplatStateRef = useRef(false);
   const splatCooldownRef = useRef(false);
 
+  // Drawing refs (Ported from GestureTracker)
+  const drawingStrokesRef = useRef<Array<{ x: number, y: number, color: string }[]>>([]);
+  const currentStrokeRef = useRef<{ x: number, y: number, color: string }[]>([]);
+  const isDrawingRef = useRef(false); // Whether currently actively drawing a stroke
+  const isIsAnalyzingRef = useRef(false); // Ref for analysis state to avoid closure issues in loop
+
   // Wakanda Forever gesture refs
   const wakandaForeverCooldownRef = useRef(false);
   const prevWakandaStateRef = useRef(false);
@@ -175,12 +181,29 @@ export default function HandTracker() {
     );
 
     const isPinchActive = distance < 0.05;
+    // Lower threshold for "ready to draw" vs "active pinch" if needed, 
+    // but here we return raw distance mostly or check strict threshold.
+    // We will use raw distance in the loop for drawing sensitivity.
+
     const position = {
       x: indexTip.x * 1280,
       y: indexTip.y * 720
     };
 
-    return { isPinchActive, position };
+    return { isPinchActive, position, distance };
+  };
+
+  // Detect Thumb-Ring Pinch for Shape Generation
+  const detectThumbRingPinch = (landmarks: any) => {
+    const thumbTip = landmarks[4];
+    const ringTip = landmarks[16];
+
+    const distance = calculateDistance(
+      { x: thumbTip.x, y: thumbTip.y },
+      { x: ringTip.x, y: ringTip.y }
+    );
+
+    return distance < 0.05;
   };
 
   // Detect pointing up gesture (index finger pointing upward)
@@ -570,12 +593,12 @@ export default function HandTracker() {
         fillStyle: color,
         ...(useWoodTexture
           ? {
-              sprite: {
-                texture: WOOD_TEXTURE_PATH,
-                xScale: width / WOOD_TEXTURE_SIZE,
-                yScale: height / WOOD_TEXTURE_SIZE
-              }
+            sprite: {
+              texture: WOOD_TEXTURE_PATH,
+              xScale: width / WOOD_TEXTURE_SIZE,
+              yScale: height / WOOD_TEXTURE_SIZE
             }
+          }
           : {})
       }
     });
@@ -965,6 +988,10 @@ export default function HandTracker() {
       console.error(err);
     } finally {
       setIsAnalyzing(false);
+      isIsAnalyzingRef.current = false;
+      // Clear strokes after successful analysis (optional, but good for workflow)
+      drawingStrokesRef.current = [];
+      currentStrokeRef.current = [];
     }
   }, [applyAgentBodies, isAnalyzing]);
 
@@ -988,6 +1015,10 @@ export default function HandTracker() {
     });
     fireParticlesRef.current = [];
     burnGlowRef.current.clear();
+
+    // Clear drawing strokes
+    drawingStrokesRef.current = [];
+    currentStrokeRef.current = [];
 
     // Clear 3D models
     if (threeSceneRef.current) {
@@ -1040,6 +1071,9 @@ export default function HandTracker() {
           ctx.save();
           ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+          // Flag to trigger analysis after rendering everything
+          let shouldTriggerAnalysis = false;
+
           // Draw the video frame
           ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
 
@@ -1076,40 +1110,98 @@ export default function HandTracker() {
               if (i === 0) {
                 const { isPinchActive, position: pinchPosition } = detectPinchGesture(landmarks);
 
-                // DRAWING MODE: Use pinch for drawing
+                // DRAWING MODE
                 if (interactionModeRef.current === 'drawing') {
-                  if (isPinchActive) {
-                    if (!pinchStartRef.current) {
-                      // Start of pinch
-                      pinchStartRef.current = pinchPosition;
-                      setIsPinching(true);
-                    }
-                    // Update current position while pinching
-                    pinchCurrentRef.current = pinchPosition;
+                  const { isPinchActive, position: pinchPosition, distance: pinchDistance } = detectPinchGesture(landmarks);
 
-                    // Draw preview outline
-                    if (pinchStartRef.current && pinchCurrentRef.current) {
-                      ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : currentMaterialRef.current === 'fire' ? '#FF6347' : '#FFFFFF';
-                      ctx.lineWidth = 2;
-                      ctx.setLineDash([5, 5]);
-                      const width = pinchCurrentRef.current.x - pinchStartRef.current.x;
-                      const height = pinchCurrentRef.current.y - pinchStartRef.current.y;
-                      ctx.strokeRect(
-                        pinchStartRef.current.x,
-                        pinchStartRef.current.y,
-                        width,
-                        height
-                      );
-                      ctx.setLineDash([]);
+                  // Shape Generation Trigger: Thumb to Ring Finger
+                  if (detectThumbRingPinch(landmarks)) {
+                    if (!isIsAnalyzingRef.current && drawingStrokesRef.current.length > 0) {
+                      // Visual feedback for trigger
+                      const ringPos = normalizeToScreen({ x: landmarks[16].x, y: landmarks[16].y }, canvas.width, canvas.height);
+                      ctx.beginPath();
+                      ctx.arc(ringPos.x, ringPos.y, 30, 0, 2 * Math.PI);
+                      ctx.fillStyle = '#00FF00';
+                      ctx.fill();
+                      ctx.fillStyle = '#000000';
+                      ctx.font = 'bold 12px sans-serif';
+                      ctx.fillText('SENDING...', ringPos.x - 20, ringPos.y);
+
+                      // Trigger analysis flag - deferred to end of frame
+                      shouldTriggerAnalysis = true;
                     }
+                  }
+
+                  // Visual Feedback for Drawing Cursor (Thumb-Index)
+                  // Show circle when fingers are close
+                  const screenPos = pinchPosition;
+
+                  // Calculate circle radius based on pinch distance (closer = smaller)
+                  // Use raw normalized distance for visuals
+                  const pinchStrength = Math.max(0, Math.min(1, 1 - (pinchDistance / 0.1)));
+                  const circleRadius = 20 + ((1 - pinchStrength) * 15);
+
+                  // Lower threshold for "ready to draw" logic (e.g. 0.2 strength or distance < 0.08)
+                  // In existing code distance < 0.05 is isPinchActive.
+                  // Let's use a slightly more generous threshold for the "Ready" visual
+                  const isReadyToDraw = pinchDistance < 0.08;
+
+                  if (isReadyToDraw) {
+                    ctx.beginPath();
+                    ctx.arc(screenPos.x, screenPos.y, circleRadius, 0, 2 * Math.PI);
+                    ctx.strokeStyle = isPinchActive ? '#FFFFFF' : '#FFFF00'; // White if drawing, Yellow if ready
+                    ctx.lineWidth = isPinchActive ? 5 : 2;
+                    ctx.stroke();
+
+                    if (isPinchActive) {
+                      ctx.beginPath();
+                      ctx.arc(screenPos.x, screenPos.y, 8, 0, 2 * Math.PI);
+                      ctx.fillStyle = '#FFFFFF';
+                      ctx.fill();
+                    }
+                  }
+
+                  // Freehand Drawing Logic
+                  if (isPinchActive) {
+                    if (!isDrawingRef.current) {
+                      // Start new stroke
+                      isDrawingRef.current = true;
+                      setIsPinching(true); // For UI status
+                      currentStrokeRef.current = [{ x: screenPos.x, y: screenPos.y, color: '#FFFFFF' }];
+                    } else {
+                      // Continue stroke
+                      currentStrokeRef.current.push({ x: screenPos.x, y: screenPos.y, color: '#FFFFFF' });
+                    }
+
+                    // "DRAWING" text
+                    ctx.font = 'bold 16px sans-serif';
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.strokeStyle = '#000000';
+                    ctx.lineWidth = 4;
+                    ctx.strokeText('DRAWING', screenPos.x, screenPos.y - 40);
+                    ctx.fillText('DRAWING', screenPos.x, screenPos.y - 40);
+
                   } else {
-                    // Release pinch
-                    if (pinchStartRef.current && pinchCurrentRef.current) {
-                      createBox(pinchStartRef.current, pinchCurrentRef.current);
+                    // Not pinching enough to draw
+                    if (isDrawingRef.current) {
+                      // Just finished a stroke
+                      isDrawingRef.current = false;
+                      setIsPinching(false);
+                      if (currentStrokeRef.current.length > 1) {
+                        drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
+                      }
+                      currentStrokeRef.current = [];
                     }
-                    pinchStartRef.current = null;
-                    pinchCurrentRef.current = null;
-                    setIsPinching(false);
+
+                    // Show "READY" or "PINCH" text if close
+                    if (isReadyToDraw) {
+                      ctx.font = 'bold 14px sans-serif';
+                      ctx.fillStyle = '#FFFF00';
+                      ctx.strokeStyle = '#000000';
+                      ctx.lineWidth = 3;
+                      ctx.strokeText('PINCH', screenPos.x, screenPos.y - 35);
+                      ctx.fillText('PINCH', screenPos.x, screenPos.y - 35);
+                    }
                   }
                 }
 
@@ -1171,7 +1263,7 @@ export default function HandTracker() {
 
             if (results.multiHandLandmarks && results.multiHandedness) {
               for (let i = 0; i < results.multiHandLandmarks.length; i++) {
-                const landmarks = results.multiHandLandmarks[i];
+                const landmarks: Landmark[] = results.multiHandLandmarks[i];
                 const handedness = results.multiHandedness[i];
                 const isRightHand = handedness.label === 'Right';
 
@@ -1342,6 +1434,11 @@ export default function HandTracker() {
             pinchStartRef.current = null;
             pinchCurrentRef.current = null;
             setIsPinching(false);
+            isDrawingRef.current = false; // Reset drawing state
+            if (currentStrokeRef.current.length > 1) {
+              drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
+            }
+            currentStrokeRef.current = [];
 
             // Release grabbed box if no hands detected
             if (grabbedBoxRef.current) {
@@ -1357,6 +1454,47 @@ export default function HandTracker() {
             if (engineRef.current) {
               engineRef.current.gravity.y = 0.5;
             }
+          }
+
+          // RENDER STROKES (Always render on top, regardless of mode, until cleared)
+          // Draw existing strokes
+          drawingStrokesRef.current.forEach(stroke => {
+            if (stroke.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(stroke[0].x, stroke[0].y);
+            for (let i = 1; i < stroke.length; i++) {
+              ctx.lineTo(stroke[i].x, stroke[i].y);
+            }
+            ctx.strokeStyle = stroke[0].color;
+            ctx.lineWidth = 5;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+          });
+
+          // Draw current stroke being drawn
+          if (currentStrokeRef.current.length > 1) {
+            const stroke = currentStrokeRef.current;
+            ctx.beginPath();
+            ctx.moveTo(stroke[0].x, stroke[0].y);
+            for (let i = 1; i < stroke.length; i++) {
+              ctx.lineTo(stroke[i].x, stroke[i].y);
+            }
+            ctx.strokeStyle = stroke[0].color;
+            ctx.lineWidth = 5;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+          }
+
+          // Trigger analysis if needed (now that everything is drawn)
+          if (shouldTriggerAnalysis) {
+            // Set the ref here to prevent double-triggering in next frame before async starts
+            isIsAnalyzingRef.current = true;
+            // Use setTimeout to allow the browser to paint? 
+            // Actually toDataURL is synchronous on the canvas content currently in the context.
+            // So calling it here captures exactly what we just drew.
+            handleAnalyzeFrame();
           }
 
           ctx.restore();
@@ -1605,11 +1743,10 @@ export default function HandTracker() {
         {/* Mode indicator */}
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">Mode:</span>
-          <span className={`px-3 py-1 rounded text-sm font-bold ${
-            interactionMode === 'drawing'
-              ? 'bg-green-600 text-white'
-              : 'bg-blue-600 text-white'
-          }`}>
+          <span className={`px-3 py-1 rounded text-sm font-bold ${interactionMode === 'drawing'
+            ? 'bg-green-600 text-white'
+            : 'bg-blue-600 text-white'
+            }`}>
             {interactionMode === 'drawing' ? 'Drawing' : 'Physics'}
           </span>
           <span className="text-xs text-yellow-400">Cross arms to toggle</span>
@@ -1625,11 +1762,10 @@ export default function HandTracker() {
                   setCurrentMaterial('solid');
                   currentMaterialRef.current = 'solid';
                 }}
-                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                  currentMaterial === 'solid'
-                    ? 'bg-blue-600 hover:bg-blue-700'
-                    : 'bg-gray-600 hover:bg-gray-700'
-                }`}
+                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${currentMaterial === 'solid'
+                  ? 'bg-blue-600 hover:bg-blue-700'
+                  : 'bg-gray-600 hover:bg-gray-700'
+                  }`}
               >
                 Solid
               </button>
@@ -1638,11 +1774,10 @@ export default function HandTracker() {
                   setCurrentMaterial('water');
                   currentMaterialRef.current = 'water';
                 }}
-                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                  currentMaterial === 'water'
-                    ? 'bg-blue-600 hover:bg-blue-700'
-                    : 'bg-gray-600 hover:bg-gray-700'
-                }`}
+                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${currentMaterial === 'water'
+                  ? 'bg-blue-600 hover:bg-blue-700'
+                  : 'bg-gray-600 hover:bg-gray-700'
+                  }`}
               >
                 Water
               </button>
@@ -1651,11 +1786,10 @@ export default function HandTracker() {
                   setCurrentMaterial('fire');
                   currentMaterialRef.current = 'fire';
                 }}
-                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                  currentMaterial === 'fire'
-                    ? 'bg-orange-600 hover:bg-orange-700'
-                    : 'bg-gray-600 hover:bg-gray-700'
-                }`}
+                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${currentMaterial === 'fire'
+                  ? 'bg-orange-600 hover:bg-orange-700'
+                  : 'bg-gray-600 hover:bg-gray-700'
+                  }`}
               >
                 Fire
               </button>
@@ -1668,11 +1802,10 @@ export default function HandTracker() {
                     setSolidStyle('color');
                     solidStyleRef.current = 'color';
                   }}
-                  className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                    solidStyle === 'color'
-                      ? 'bg-emerald-600 hover:bg-emerald-700'
-                      : 'bg-gray-600 hover:bg-gray-700'
-                  }`}
+                  className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${solidStyle === 'color'
+                    ? 'bg-emerald-600 hover:bg-emerald-700'
+                    : 'bg-gray-600 hover:bg-gray-700'
+                    }`}
                 >
                   Color
                 </button>
@@ -1681,11 +1814,10 @@ export default function HandTracker() {
                     setSolidStyle('wood');
                     solidStyleRef.current = 'wood';
                   }}
-                  className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                    solidStyle === 'wood'
-                      ? 'bg-amber-600 hover:bg-amber-700'
-                      : 'bg-gray-600 hover:bg-gray-700'
-                  }`}
+                  className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${solidStyle === 'wood'
+                    ? 'bg-amber-600 hover:bg-amber-700'
+                    : 'bg-gray-600 hover:bg-gray-700'
+                    }`}
                 >
                   Wood
                 </button>
@@ -1698,9 +1830,8 @@ export default function HandTracker() {
           <button
             onClick={handleAnalyzeFrame}
             disabled={isAnalyzing}
-            className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-              isAnalyzing ? 'bg-gray-600' : 'bg-purple-600 hover:bg-purple-700'
-            }`}
+            className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${isAnalyzing ? 'bg-gray-600' : 'bg-purple-600 hover:bg-purple-700'
+              }`}
           >
             {isAnalyzing ? 'Analyzing…' : 'Analyze Frame'}
           </button>
@@ -1816,7 +1947,7 @@ export default function HandTracker() {
           <li><strong>Fire:</strong> Realistic flames with blackbody radiation colors (white-yellow core → orange → red edges), turbulence distortion, and glow. Burns boxes on contact!</li>
           <li>Switch modes and materials using buttons in top-right corner</li>
         </ul>
-        </div>
       </div>
+    </div>
   );
 }
