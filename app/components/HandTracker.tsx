@@ -33,15 +33,15 @@ type InteractionMode = 'drawing' | 'physics';
 // Water configuration - using metaball/liquid rendering approach with Gaussian blur
 const WATER_PARTICLE_RADIUS = 12;
 const WATER_PARTICLE_SPACING = 20;
-const WATER_COLOR = 'rgba(77, 157, 224, 1)'; // Solid color for filter effect
+const WATER_COLOR = 'rgba(77, 157, 224, 0.6)';
 const WATER_BLUR_AMOUNT = 12; // Gaussian blur stdDeviation
 const WATER_CONTRAST = 20; // Color matrix alpha multiplier
 const WATER_THRESHOLD = -10; // Color matrix alpha offset
 
 // Fire configuration - Realistic fire rendering with blackbody radiation colors
 const FIRE_PARTICLE_RADIUS = 14;
-const FIRE_PARTICLE_SPACING = 18;
-const MAX_FIRE_PARTICLES = 400;
+const FIRE_PARTICLE_SPACING = 24;
+const MAX_FIRE_PARTICLES = 320;
 const FIRE_LIFETIME = 2500; // milliseconds before fire particle dies
 const FIRE_UPWARD_FORCE = 0.00045; // stronger upward force for more realistic rising
 const BURN_DAMAGE_RATE = 0.025; // health reduction per frame when touching fire
@@ -49,6 +49,9 @@ const BURN_DISTANCE = 35; // distance at which fire can burn objects
 const FIRE_BLUR_AMOUNT = 8; // Gaussian blur for fire glow
 const FIRE_TURBULENCE_FREQ = 0.04; // Turbulence frequency for flame distortion
 const FIRE_TURBULENCE_OCTAVES = 3; // Turbulence complexity
+const BURN_GLOW_LIFETIME = 900; // milliseconds for burn glow to linger
+const BURN_GLOW_BLUR = 14;
+const BURN_GLOW_COLOR = 'rgba(255, 120, 40, 0.6)';
 
 // Blackbody radiation color gradient (temperature-based: hot core -> cool edges)
 // Based on Planck's law approximation for fire temperatures (800K - 1500K)
@@ -92,6 +95,7 @@ export default function HandTracker() {
   const physicsCanvasRef = useRef<HTMLCanvasElement>(null);
   const waterCanvasRef = useRef<HTMLCanvasElement>(null);
   const fireCanvasRef = useRef<HTMLCanvasElement>(null);
+  const burnGlowCanvasRef = useRef<HTMLCanvasElement>(null);
   const threejsCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +121,8 @@ export default function HandTracker() {
   const wallsRef = useRef<Matter.Body[]>([]);
   const waterAnimationRef = useRef<number | null>(null);
   const fireAnimationRef = useRef<number | null>(null);
+  const burnGlowAnimationRef = useRef<number | null>(null);
+  const burnGlowRef = useRef<Map<Matter.Body, { timestamp: number; level: number }>>(new Map());
 
   // Gesture tracking refs
   const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -503,6 +509,10 @@ export default function HandTracker() {
               // Darken color based on burn level
               box.render.opacity = Math.max(0.3, 1 - burnLevel);
             }
+            burnGlowRef.current.set(box, {
+              timestamp: Date.now(),
+              level: Math.min(1, burnLevel + 0.2)
+            });
 
             // Remove box if health reaches 0
             if (newHealth <= 0) {
@@ -706,6 +716,12 @@ export default function HandTracker() {
           }
         });
 
+        // Random initial velocity to avoid a dense, uniform rise
+        Matter.Body.setVelocity(particle, {
+          x: (Math.random() - 0.5) * 1.2,
+          y: -(0.8 + Math.random() * 1.6)
+        });
+
         Matter.World.add(engineRef.current.world, particle);
         fireParticlesRef.current.push({
           body: particle,
@@ -829,6 +845,55 @@ export default function HandTracker() {
     fireAnimationRef.current = requestAnimationFrame(renderFire);
   }, []);
 
+  // Render burn glow on boxes affected by fire (soft blur, no particles)
+  const renderBurnGlow = useCallback(() => {
+    const burnCanvas = burnGlowCanvasRef.current;
+    if (!burnCanvas) return;
+
+    const ctx = burnCanvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, burnCanvas.width, burnCanvas.height);
+
+    const now = Date.now();
+    for (const [box, info] of burnGlowRef.current.entries()) {
+      if (!boxesRef.current.includes(box)) {
+        burnGlowRef.current.delete(box);
+        continue;
+      }
+
+      const age = now - info.timestamp;
+      if (age > BURN_GLOW_LIFETIME) {
+        burnGlowRef.current.delete(box);
+        continue;
+      }
+
+      const width = box.bounds.max.x - box.bounds.min.x;
+      const height = box.bounds.max.y - box.bounds.min.y;
+      const radius = Math.max(width, height) * 0.7;
+      const alpha = (1 - age / BURN_GLOW_LIFETIME) * (0.35 + info.level * 0.6);
+      const x = box.position.x;
+      const y = box.position.y;
+
+      ctx.save();
+      ctx.filter = `blur(${BURN_GLOW_BLUR}px)`;
+      ctx.globalCompositeOperation = 'lighter';
+
+      const gradient = ctx.createRadialGradient(x, y, radius * 0.2, x, y, radius);
+      gradient.addColorStop(0, `rgba(255, 220, 160, ${alpha})`);
+      gradient.addColorStop(0.6, `rgba(255, 140, 60, ${alpha * 0.7})`);
+      gradient.addColorStop(1, 'rgba(120, 20, 0, 0)');
+
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.ellipse(x, y, width * 0.7, height * 0.7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    burnGlowAnimationRef.current = requestAnimationFrame(renderBurnGlow);
+  }, []);
+
   // Clear all boxes and particles
   const clearAllBoxes = () => {
     if (!engineRef.current) return;
@@ -848,6 +913,7 @@ export default function HandTracker() {
       Matter.World.remove(engineRef.current!.world, fireParticle.body);
     });
     fireParticlesRef.current = [];
+    burnGlowRef.current.clear();
 
     // Clear 3D models
     if (threeSceneRef.current) {
@@ -1247,6 +1313,9 @@ export default function HandTracker() {
         // Start fire rendering loop
         renderFire();
 
+        // Start burn glow rendering loop
+        renderBurnGlow();
+
         setIsLoading(false);
 
       } catch (err) {
@@ -1272,6 +1341,9 @@ export default function HandTracker() {
       if (fireAnimationRef.current) {
         cancelAnimationFrame(fireAnimationRef.current);
       }
+      if (burnGlowAnimationRef.current) {
+        cancelAnimationFrame(burnGlowAnimationRef.current);
+      }
       if (runnerRef.current && engineRef.current) {
         Matter.Runner.stop(runnerRef.current);
       }
@@ -1293,7 +1365,7 @@ export default function HandTracker() {
         });
       }
     };
-  }, [renderWater, renderFire]);
+  }, [renderWater, renderFire, renderBurnGlow]);
 
   // Function to load MediaPipe scripts dynamically
   const loadMediaPipeScripts = (): Promise<void> => {
@@ -1609,6 +1681,15 @@ export default function HandTracker() {
         width={1280}
         height={720}
         style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 2 }}
+      />
+
+      {/* Burn glow overlay for heated boxes */}
+      <canvas
+        ref={burnGlowCanvasRef}
+        className="absolute max-w-full max-h-full pointer-events-none"
+        width={1280}
+        height={720}
+        style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 2.4 }}
       />
 
       {/* Three.js canvas for 3D models */}
