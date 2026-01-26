@@ -407,8 +407,10 @@ export default function GestureTracker() {
                   const circleRadius = 20 + (thumbIndexPinch.strength * 15);
 
                   // Only draw/active if pinch strength is sufficient (slightly buffered)
-                  // Lower threshold to make it easier to start drawing when circle appears
-                  const isReadyToDraw = thumbIndexPinch.strength > 0.2;
+                  // User Request: "draw whenever the circle shows up"
+                  // Since the circle shows up whenever thumbIndexPinch exists, we should use that condition directly.
+                  // Or use a very low threshold if needed, but existing detection likely already handles noise.
+                  const isReadyToDraw = true; // thumbIndexPinch exists, so we draw
 
                   // Draw pulsing circle
                   ctx.beginPath();
@@ -481,7 +483,8 @@ export default function GestureTracker() {
                 const currentHueColor = `hsl(${hue}, 100%, 50%)`;
 
                 // Update current color as hand rotates
-                setCurrentColor(currentHueColor);
+                // setCurrentColor(currentHueColor); // DISABLED: User wants tap-to-select behavior
+                // The currentHueColor will be used for PREVIEW (visuals), but not for drawing until pinned.
 
                 // Draw smooth continuous hue wheel ring
                 const wheelRadius = 80;
@@ -544,6 +547,7 @@ export default function GestureTracker() {
                   if (!prevLeftHandPinchRef.current) {
                     // Pinch started - lock in current color
                     setLockedColor(currentHueColor);
+                    setCurrentColor(currentHueColor); // Update the active drawing color ONLY on pinch
                     prevLeftHandPinchRef.current = true;
 
                     // Visual feedback
@@ -856,8 +860,8 @@ export default function GestureTracker() {
             <button
               onClick={() => setIsDrawingMode(!isDrawingMode)}
               className={`px-4 py-2 rounded-lg font-semibold transition-colors ${isDrawingMode
-                  ? 'bg-purple-600 hover:bg-purple-700 text-white'
-                  : 'bg-gray-700 hover:bg-gray-600 text-white'
+                ? 'bg-purple-600 hover:bg-purple-700 text-white'
+                : 'bg-gray-700 hover:bg-gray-600 text-white'
                 }`}
             >
               {isDrawingMode ? '🎨 Drawing Mode' : '👋 Gesture Mode'}
@@ -1200,8 +1204,8 @@ export default function GestureTracker() {
                     <div
                       key={finger}
                       className={`text-center py-2 rounded text-xs font-semibold ${extended
-                          ? 'bg-green-600 text-white'
-                          : 'bg-gray-700 text-gray-500'
+                        ? 'bg-green-600 text-white'
+                        : 'bg-gray-700 text-gray-500'
                         }`}
                     >
                       {finger.charAt(0).toUpperCase()}
