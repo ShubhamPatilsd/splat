@@ -108,6 +108,8 @@ export default function HandTracker() {
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
   const [particleCount, setParticleCount] = useState(0);
   const [splatActive, setSplatActive] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [agentPrompt, setAgentPrompt] = useState<string | null>(null);
 
   // Matter.js refs
   const engineRef = useRef<Matter.Engine | null>(null);
@@ -894,6 +896,78 @@ export default function HandTracker() {
     burnGlowAnimationRef.current = requestAnimationFrame(renderBurnGlow);
   }, []);
 
+  const applyAgentBodies = useCallback((bodies: Array<Record<string, any>>) => {
+    if (!engineRef.current) return;
+
+    const created: Matter.Body[] = [];
+    for (const bodySpec of bodies) {
+      const { method, args = [], options } = bodySpec || {};
+      if (!method || !Array.isArray(args)) continue;
+
+      let body: Matter.Body | null = null;
+      switch (method) {
+        case 'rectangle':
+          body = Matter.Bodies.rectangle(args[0], args[1], args[2], args[3], options);
+          break;
+        case 'circle':
+          body = Matter.Bodies.circle(args[0], args[1], args[2], options, args[3]);
+          break;
+        case 'polygon':
+          body = Matter.Bodies.polygon(args[0], args[1], args[2], args[3], options);
+          break;
+        case 'trapezoid':
+          body = Matter.Bodies.trapezoid(args[0], args[1], args[2], args[3], args[4], options);
+          break;
+        case 'fromVertices':
+          body = Matter.Bodies.fromVertices(args[0], args[1], args[2], options, args[3], args[4], args[5], args[6]) as Matter.Body;
+          break;
+        default:
+          break;
+      }
+
+      if (body) {
+        if (!body.render.fillStyle) {
+          body.render.fillStyle = BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)];
+        }
+        created.push(body);
+      }
+    }
+
+    if (created.length > 0) {
+      Matter.World.add(engineRef.current.world, created);
+      boxesRef.current.push(...created);
+      created.forEach(box => boxHealthRef.current.set(box, 1.0));
+    }
+  }, []);
+
+  const handleAnalyzeFrame = useCallback(async () => {
+    if (!canvasRef.current || isAnalyzing) return;
+
+    try {
+      setIsAnalyzing(true);
+      const imageData = canvasRef.current.toDataURL('image/png');
+      const response = await fetch('/api/shape-agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageData })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to analyze frame.');
+      }
+
+      const data = await response.json();
+      setAgentPrompt(data.prompt || null);
+      if (Array.isArray(data.matterBodies)) {
+        applyAgentBodies(data.matterBodies);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [applyAgentBodies, isAnalyzing]);
+
   // Clear all boxes and particles
   const clearAllBoxes = () => {
     if (!engineRef.current) return;
@@ -1619,6 +1693,18 @@ export default function HandTracker() {
             )}
           </div>
         )}
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleAnalyzeFrame}
+            disabled={isAnalyzing}
+            className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+              isAnalyzing ? 'bg-gray-600' : 'bg-purple-600 hover:bg-purple-700'
+            }`}
+          >
+            {isAnalyzing ? 'Analyzing…' : 'Analyze Frame'}
+          </button>
+        </div>
       </div>
 
       {/* Loading spinner */}
@@ -1712,6 +1798,11 @@ export default function HandTracker() {
             Clear All ({boxesRef.current.length + particleCount + fireParticlesRef.current.length})
           </button>
         </div>
+        {agentPrompt && (
+          <div className="mb-2 text-xs text-purple-200">
+            Agent: {agentPrompt}
+          </div>
+        )}
         <ul className="list-disc list-inside space-y-1 text-xs">
           <li>Green = Right hand, Red = Left hand</li>
           <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : currentMaterial === 'water' ? 'water' : 'fire'}</li>
