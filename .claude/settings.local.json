@@ -14,10 +14,8 @@
       "Bash(taskkill:*)",
       "Bash(del \"E:\\\\splat\\\\.next\\\\dev\\\\lock\")",
       "Bash(git add:*)",
-      "mcp__ide__getDiagnostics",
-      "Bash(xargs cat:*)",
-      "Bash(npx next:*)",
-      "Bash(npx tsc:*)"
+      "WebFetch(domain:andrewkchan.dev)",
+      "WebFetch(domain:clockworkchilli.com)"
     ]
   }
 }
