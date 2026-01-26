@@ -30,12 +30,27 @@ type SolidStyle = 'color' | 'wood';
 // Interaction modes
 type InteractionMode = 'drawing' | 'physics';
 
+// Drawing style in drawing mode: box (drag rectangle) or freehand (stroke path)
+type DrawingStyle = 'box' | 'freehand';
+
 // Pending drawing (visual-only in drawing mode, converted to physics when switching to physics mode)
-type PendingDrawing = {
-  start: { x: number; y: number };
-  end: { x: number; y: number };
-  material: MaterialType;
-  solidStyle: SolidStyle;
+type PendingDrawing =
+  | {
+      start: { x: number; y: number };
+      end: { x: number; y: number };
+      material: MaterialType;
+      solidStyle: SolidStyle;
+    }
+  | {
+      points: { x: number; y: number }[];
+      material: MaterialType;
+      solidStyle: SolidStyle;
+    };
+
+// Build SVG path d from points for freehand strokes
+const pointsToSvgPathD = (points: { x: number; y: number }[]): string => {
+  if (points.length < 2) return '';
+  return points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
 };
 
 // Water configuration - using metaball/liquid rendering approach with Gaussian blur
@@ -114,8 +129,10 @@ export default function HandTracker() {
   const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('solid');
   const [solidStyle, setSolidStyle] = useState<SolidStyle>('color');
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
+  const [drawingStyle, setDrawingStyle] = useState<DrawingStyle>('box');
   const [particleCount, setParticleCount] = useState(0);
-  const [pendingDrawingsCount, setPendingDrawingsCount] = useState(0);
+  const [pendingDrawings, setPendingDrawings] = useState<PendingDrawing[]>([]);
+  const setPendingDrawingsRef = useRef<(d: PendingDrawing[]) => void>(() => {});
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [agentPrompt, setAgentPrompt] = useState<string | null>(null);
 
@@ -140,6 +157,15 @@ export default function HandTracker() {
   const currentMaterialRef = useRef<MaterialType>('solid');
   const solidStyleRef = useRef<SolidStyle>('color');
   const interactionModeRef = useRef<InteractionMode>('drawing');
+  const drawingStyleRef = useRef<DrawingStyle>('box');
+
+  // Freehand path accumulated while pinching (drawing mode, freehand style)
+  const freehandPathRef = useRef<{ x: number; y: number }[]>([]);
+
+  // Hysteresis for left-hand rotation → box vs freehand: switch to box when |angle| < 45°, freehand when |angle| > 55°
+  const leftHandRotationFreehandRef = useRef(false);
+  const ROTATION_BOX_MAX_DEG = 45;
+  const ROTATION_FREEHAND_MIN_DEG = 55;
 
   // Throwing/grabbing refs
   const grabbedBoxRef = useRef<Matter.Body | null>(null);
@@ -152,7 +178,9 @@ export default function HandTracker() {
   // Knuckles-together mode switch refs
   const knucklesCooldownRef = useRef(false);
   const prevKnucklesTogetherRef = useRef(false);
-  const KNUCKLES_COOLDOWN_MS = 1000;
+  const knucklesTogetherSinceRef = useRef<number | null>(null);
+  const KNUCKLES_COOLDOWN_MS = 2800;
+  const KNUCKLES_HOLD_MS = 550;
 
   // Three.js refs for 3D models
   const threeSceneRef = useRef<THREE.Scene | null>(null);
@@ -169,6 +197,16 @@ export default function HandTracker() {
   // Helper function to calculate Euclidean distance
   const calculateDistance = (point1: { x: number; y: number }, point2: { x: number; y: number }) => {
     return Math.sqrt(Math.pow(point2.x - point1.x, 2) + Math.pow(point2.y - point1.y, 2));
+  };
+
+  // Left-hand rotation (degrees): 0 = fingers up, 90 = fingers right, -90 = fingers left. Used to switch box vs freehand in drawing mode.
+  const getLeftHandRotationDeg = (landmarks: any): number => {
+    const wrist = landmarks[0];
+    const middleMcp = landmarks[9];
+    const dx = middleMcp.x - wrist.x;
+    const dy = middleMcp.y - wrist.y;
+    const rad = Math.atan2(dx, -dy);
+    return (rad * 180) / Math.PI;
   };
 
   // Detect pinch gesture and return state and position
@@ -881,6 +919,7 @@ export default function HandTracker() {
   // Clear all boxes, particles, and pending drawings
   const clearAllBoxes = () => {
     drawingsRef.current = [];
+    setPendingDrawingsRef.current([]);
     if (!engineRef.current) return;
 
     boxesRef.current.forEach(box => {
@@ -912,6 +951,14 @@ export default function HandTracker() {
 
     setParticleCount(0);
   };
+
+  useEffect(() => {
+    drawingStyleRef.current = drawingStyle;
+  }, [drawingStyle]);
+
+  useEffect(() => {
+    setPendingDrawingsRef.current = setPendingDrawings;
+  });
 
   useEffect(() => {
     let camera: any = null;
@@ -954,26 +1001,7 @@ export default function HandTracker() {
           // Draw the video frame
           ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
 
-          // Draw pending drawings (drawing mode only — not yet physics)
-          drawingsRef.current.forEach(d => {
-            const minX = Math.min(d.start.x, d.end.x);
-            const minY = Math.min(d.start.y, d.end.y);
-            const w = Math.abs(d.end.x - d.start.x);
-            const h = Math.abs(d.end.y - d.start.y);
-            ctx.save();
-            if (d.material === 'water') {
-              ctx.fillStyle = 'rgba(77, 157, 224, 0.5)';
-            } else if (d.material === 'fire') {
-              ctx.fillStyle = 'rgba(255, 99, 71, 0.5)';
-            } else {
-              ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-            }
-            ctx.strokeStyle = d.material === 'water' ? '#4D9DE0' : d.material === 'fire' ? '#FF6347' : '#FFFFFF';
-            ctx.lineWidth = 2;
-            ctx.fillRect(minX, minY, w, h);
-            ctx.strokeRect(minX, minY, w, h);
-            ctx.restore();
-          });
+          // Pending drawings are rendered as custom SVG overlay (see below), not on canvas
 
           // Draw hand landmarks if detected
           if (results.multiHandLandmarks && results.multiHandedness) {
@@ -1004,54 +1032,83 @@ export default function HandTracker() {
                 }
               );
 
-              // Gesture detection for first hand
-              if (i === 0) {
+              // Right hand: pinch for drawing (drawing mode) or grab/throw (physics mode)
+              if (isRightHand) {
                 const { isPinchActive, position: pinchPosition } = detectPinchGesture(landmarks);
 
-                // DRAWING MODE: Use pinch for drawing
+                // DRAWING MODE: Use pinch for drawing (box or freehand)
                 if (interactionModeRef.current === 'drawing') {
+                  const isFreehand = drawingStyleRef.current === 'freehand';
                   if (isPinchActive) {
                     if (!pinchStartRef.current) {
-                      // Start of pinch
                       pinchStartRef.current = pinchPosition;
+                      freehandPathRef.current = isFreehand ? [{ ...pinchPosition }] : [];
                       setIsPinching(true);
                     }
-                    // Update current position while pinching
                     pinchCurrentRef.current = pinchPosition;
+                    if (isFreehand) {
+                      const last = freehandPathRef.current[freehandPathRef.current.length - 1];
+                      const dist = last ? Math.hypot(pinchPosition.x - last.x, pinchPosition.y - last.y) : 999;
+                      if (dist > 8) {
+                        freehandPathRef.current.push({ ...pinchPosition });
+                      }
+                    }
 
-                    // Draw preview outline
+                    // Draw preview
                     if (pinchStartRef.current && pinchCurrentRef.current) {
                       ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : currentMaterialRef.current === 'fire' ? '#FF6347' : '#FFFFFF';
                       ctx.lineWidth = 2;
-                      ctx.setLineDash([5, 5]);
-                      const width = pinchCurrentRef.current.x - pinchStartRef.current.x;
-                      const height = pinchCurrentRef.current.y - pinchStartRef.current.y;
-                      ctx.strokeRect(
-                        pinchStartRef.current.x,
-                        pinchStartRef.current.y,
-                        width,
-                        height
-                      );
-                      ctx.setLineDash([]);
+                      if (isFreehand && freehandPathRef.current.length >= 2) {
+                        ctx.setLineDash([4, 4]);
+                        ctx.beginPath();
+                        ctx.moveTo(freehandPathRef.current[0].x, freehandPathRef.current[0].y);
+                        for (let k = 1; k < freehandPathRef.current.length; k++) {
+                          ctx.lineTo(freehandPathRef.current[k].x, freehandPathRef.current[k].y);
+                        }
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                      } else if (!isFreehand) {
+                        ctx.setLineDash([5, 5]);
+                        const width = pinchCurrentRef.current.x - pinchStartRef.current.x;
+                        const height = pinchCurrentRef.current.y - pinchStartRef.current.y;
+                        ctx.strokeRect(
+                          pinchStartRef.current.x,
+                          pinchStartRef.current.y,
+                          width,
+                          height
+                        );
+                        ctx.setLineDash([]);
+                      }
                     }
                   } else {
-                    // Release pinch — in drawing mode store as pending drawing (converted to physics when switching mode)
+                    // Release pinch — store pending drawing
                     if (pinchStartRef.current && pinchCurrentRef.current) {
-                      const start = pinchStartRef.current;
-                      const end = pinchCurrentRef.current;
-                      const w = Math.abs(end.x - start.x);
-                      const h = Math.abs(end.y - start.y);
-                      if (w >= 20 && h >= 20) {
+                      if (isFreehand && freehandPathRef.current.length >= 4) {
                         drawingsRef.current.push({
-                          start: { ...start },
-                          end: { ...end },
+                          points: freehandPathRef.current.map(p => ({ ...p })),
                           material: currentMaterialRef.current,
                           solidStyle: solidStyleRef.current
                         });
+                        setPendingDrawingsRef.current([...drawingsRef.current]);
+                      } else if (!isFreehand) {
+                        const start = pinchStartRef.current;
+                        const end = pinchCurrentRef.current;
+                        const w = Math.abs(end.x - start.x);
+                        const h = Math.abs(end.y - start.y);
+                        if (w >= 20 && h >= 20) {
+                          drawingsRef.current.push({
+                            start: { ...start },
+                            end: { ...end },
+                            material: currentMaterialRef.current,
+                            solidStyle: solidStyleRef.current
+                          });
+                          setPendingDrawingsRef.current([...drawingsRef.current]);
+                        }
                       }
                     }
                     pinchStartRef.current = null;
                     pinchCurrentRef.current = null;
+                    freehandPathRef.current = [];
                     setIsPinching(false);
                   }
                 }
@@ -1106,6 +1163,33 @@ export default function HandTracker() {
                 }
               }
 
+              // Left hand in drawing mode: rotation drives box vs freehand. Vertical (fingers up) = box, tilted (horizontal) = freehand.
+              if (!isRightHand && interactionModeRef.current === 'drawing') {
+                const angleDeg = getLeftHandRotationDeg(landmarks);
+                const absAngle = Math.abs(angleDeg);
+                let nextFreehand = leftHandRotationFreehandRef.current;
+                if (absAngle < ROTATION_BOX_MAX_DEG) {
+                  nextFreehand = false;
+                } else if (absAngle > ROTATION_FREEHAND_MIN_DEG) {
+                  nextFreehand = true;
+                }
+                if (nextFreehand !== (drawingStyleRef.current === 'freehand')) {
+                  const next: DrawingStyle = nextFreehand ? 'freehand' : 'box';
+                  drawingStyleRef.current = next;
+                  setDrawingStyle(next);
+                }
+                leftHandRotationFreehandRef.current = nextFreehand;
+                // Draw a small label near the left hand so user sees current mode
+                const cx = landmarks[9].x * canvas.width;
+                const cy = landmarks[9].y * canvas.height;
+                ctx.save();
+                ctx.font = 'bold 14px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = drawingStyleRef.current === 'freehand' ? '#22D3EE' : '#A78BFA';
+                ctx.fillText(drawingStyleRef.current === 'freehand' ? 'Free' : 'Box', cx, cy - 30);
+                ctx.restore();
+              }
             }
 
             // Check for antigravity gesture (requires BOTH hands)
@@ -1183,9 +1267,21 @@ export default function HandTracker() {
 
               if (leftHandLandmarks && rightHandLandmarks) {
                 const isKnucklesTogether = detectKnucklesTogetherGesture(leftHandLandmarks, rightHandLandmarks);
+                const now = Date.now();
 
-                // Detect onset (knuckles just came together) with cooldown → toggle drawing/physics
-                if (isKnucklesTogether && !prevKnucklesTogetherRef.current && !knucklesCooldownRef.current) {
+                // Start hold timer when knuckles first come together
+                if (isKnucklesTogether && !prevKnucklesTogetherRef.current) {
+                  knucklesTogetherSinceRef.current = now;
+                }
+                if (!isKnucklesTogether) {
+                  knucklesTogetherSinceRef.current = null;
+                }
+
+                // Toggle only after holding the gesture for KNUCKLES_HOLD_MS and when cooldown has passed
+                const holdElapsed = knucklesTogetherSinceRef.current != null ? now - knucklesTogetherSinceRef.current : 0;
+                const heldLongEnough = holdElapsed >= KNUCKLES_HOLD_MS;
+
+                if (isKnucklesTogether && heldLongEnough && !knucklesCooldownRef.current) {
                   // Toggle interaction mode
                   const newMode: InteractionMode = interactionModeRef.current === 'drawing' ? 'physics' : 'drawing';
                   setInteractionMode(newMode);
@@ -1195,14 +1291,45 @@ export default function HandTracker() {
                   if (newMode === 'physics' && drawingsRef.current.length > 0) {
                     const toConvert = [...drawingsRef.current];
                     drawingsRef.current = [];
-                    setPendingDrawingsCount(0);
+                    setPendingDrawingsRef.current([]);
                     toConvert.forEach(d => {
-                      if (d.material === 'water') {
-                        createWater(d.start, d.end);
-                      } else if (d.material === 'fire') {
-                        createFire(d.start, d.end);
+                      if ('points' in d && d.points.length >= 2) {
+                        const minX = Math.min(...d.points.map(p => p.x));
+                        const maxX = Math.max(...d.points.map(p => p.x));
+                        const minY = Math.min(...d.points.map(p => p.y));
+                        const maxY = Math.max(...d.points.map(p => p.y));
+                        if (d.material === 'water') {
+                          // createWater requires width/height >= 30; use at least 30x30 centered on stroke
+                          const w = Math.max(30, maxX - minX);
+                          const h = Math.max(30, maxY - minY);
+                          const cx = (minX + maxX) / 2;
+                          const cy = (minY + maxY) / 2;
+                          createWater({ x: cx - w / 2, y: cy - h / 2 }, { x: cx + w / 2, y: cy + h / 2 });
+                        } else if (d.material === 'fire') {
+                          const w = Math.max(30, maxX - minX);
+                          const h = Math.max(30, maxY - minY);
+                          const cx = (minX + maxX) / 2;
+                          const cy = (minY + maxY) / 2;
+                          createFire({ x: cx - w / 2, y: cy - h / 2 }, { x: cx + w / 2, y: cy + h / 2 });
+                        } else {
+                          // createSolidBox requires width/height >= 20; use 20x20 per point (was 16x16 and rejected)
+                          const pts = d.points;
+                          const step = Math.max(1, Math.floor(pts.length / 15));
+                          const half = 10;
+                          for (let i = 0; i < pts.length; i += step) {
+                            const p = pts[i];
+                            createSolidBox({ x: p.x - half, y: p.y - half }, { x: p.x + half, y: p.y + half }, d.solidStyle);
+                          }
+                        }
                       } else {
-                        createSolidBox(d.start, d.end, d.solidStyle);
+                        const b = d as { start: { x: number; y: number }; end: { x: number; y: number }; material: MaterialType; solidStyle: SolidStyle };
+                        if (b.material === 'water') {
+                          createWater(b.start, b.end);
+                        } else if (b.material === 'fire') {
+                          createFire(b.start, b.end);
+                        } else {
+                          createSolidBox(b.start, b.end, b.solidStyle);
+                        }
                       }
                     });
                   }
@@ -1219,7 +1346,7 @@ export default function HandTracker() {
                   pinchCurrentRef.current = null;
                   setIsPinching(false);
 
-                  // Set cooldown
+                  knucklesTogetherSinceRef.current = null;
                   knucklesCooldownRef.current = true;
                   setTimeout(() => {
                     knucklesCooldownRef.current = false;
@@ -1249,6 +1376,7 @@ export default function HandTracker() {
               }
             } else {
               prevKnucklesTogetherRef.current = false;
+              knucklesTogetherSinceRef.current = null;
             }
           } else {
             setHandsDetected(0);
@@ -1462,7 +1590,7 @@ export default function HandTracker() {
                 ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30'
                 : 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30'
             }`}>
-              {interactionMode === 'drawing' ? 'Drawing' : 'Physics'}
+              {interactionMode === 'drawing' ? `Drawing (${drawingStyle === 'freehand' ? 'Free' : 'Box'})` : 'Physics'}
             </span>
           </div>
           <p className="mt-1 text-[10px] text-zinc-500">Cross arms to toggle</p>
@@ -1540,7 +1668,7 @@ export default function HandTracker() {
             onClick={clearAllBoxes}
             className="w-full py-2 rounded-xl text-xs font-medium transition-colors bg-red-500/10 text-red-400/90 ring-1 ring-red-500/20 hover:bg-red-500/20"
           >
-            Clear all ({boxesRef.current.length + particleCount + fireParticlesRef.current.length + (interactionMode === 'drawing' ? pendingDrawingsCount : 0)})
+            Clear all ({boxesRef.current.length + particleCount + fireParticlesRef.current.length + (interactionMode === 'drawing' ? pendingDrawings.length : 0)})
           </button>
         </div>
       </div>
@@ -1567,6 +1695,69 @@ export default function HandTracker() {
         width={1280}
         height={720}
       />
+
+      {/* Pending drawings as custom SVG (drawing mode): freehand paths + boxes */}
+      {interactionMode === 'drawing' && pendingDrawings.length > 0 && (
+        <svg
+          className="absolute max-w-full max-h-full pointer-events-none"
+          viewBox="0 0 1280 720"
+          preserveAspectRatio="xMidYMid meet"
+          style={{
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: 1280,
+            height: 720,
+            zIndex: 0.5
+          }}
+        >
+          <defs>
+            <filter id="freehand-stroke-shadow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="0" stdDeviation="2" floodOpacity="0.4" />
+            </filter>
+          </defs>
+          {pendingDrawings.map((d, i) => {
+            const isWater = d.material === 'water';
+            const isFire = d.material === 'fire';
+            const fill = isWater ? 'rgba(77, 157, 224, 0.5)' : isFire ? 'rgba(255, 99, 71, 0.5)' : 'rgba(255, 255, 255, 0.45)';
+            const stroke = isWater ? '#4D9DE0' : isFire ? '#FF6347' : '#FFFFFF';
+            if ('points' in d && d.points.length >= 2) {
+              const dPath = pointsToSvgPathD(d.points);
+              return (
+                <path
+                  key={i}
+                  d={dPath}
+                  fill="none"
+                  stroke={stroke}
+                  strokeWidth={isWater ? 10 : isFire ? 10 : 8}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={isWater ? 0.85 : isFire ? 0.9 : 0.9}
+                  style={{ filter: 'url(#freehand-stroke-shadow)' }}
+                />
+              );
+            }
+            const b = d as { start: { x: number; y: number }; end: { x: number; y: number } };
+            const minX = Math.min(b.start.x, b.end.x);
+            const minY = Math.min(b.start.y, b.end.y);
+            const w = Math.abs(b.end.x - b.start.x);
+            const h = Math.abs(b.end.y - b.start.y);
+            return (
+              <rect
+                key={i}
+                x={minX}
+                y={minY}
+                width={w}
+                height={h}
+                fill={fill}
+                stroke={stroke}
+                strokeWidth={2}
+                rx={2}
+              />
+            );
+          })}
+        </svg>
+      )}
 
       {/* Water canvas with liquid filter (rendered below physics) */}
       <canvas

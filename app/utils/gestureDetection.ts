@@ -433,5 +433,6 @@ export function detectKnucklesTogetherGesture(
   const rightCenter: Landmark = { x: rightCx, y: rightCy, z: rightCz };
   const d = distance(leftCenter, rightCenter);
 
-  return d < 0.12;
+  // Stricter threshold: hands must be distinctly pressed together (was 0.12)
+  return d < 0.08;
 }
