@@ -180,10 +180,18 @@ export default function HandTracker() {
   // Freehand path accumulated while pinching (drawing mode, freehand style)
   const freehandPathRef = useRef<{ x: number; y: number }[]>([]);
 
-  // Throwing/grabbing refs
+  // Throwing/grabbing refs (right hand)
   const grabbedBoxRef = useRef<Matter.Body | null>(null);
   const previousGrabPosRef = useRef<{ x: number; y: number } | null>(null);
   const grabVelocityRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Left hand grab/drag in physics mode
+  const leftGrabbedBoxRef = useRef<Matter.Body | null>(null);
+  const leftPreviousGrabPosRef = useRef<{ x: number; y: number } | null>(null);
+  const leftGrabVelocityRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Left hand in physics mode: track palm position for pushing objects (when not grabbing)
+  const prevLeftHandPhysicsPosRef = useRef<{ x: number; y: number } | null>(null);
 
   // Pending drawings (drawing mode only; converted to physics when switching to physics)
   const drawingsRef = useRef<PendingDrawing[]>([]);
@@ -308,12 +316,13 @@ export default function HandTracker() {
     return (indexDown || middleDown) && tipsBelow;
   };
 
-  // Find the closest box to a position
-  const findClosestBox = (position: { x: number; y: number }, maxDistance: number = 100) => {
+  // Find the closest box to a position (optionally exclude a body, e.g. one held by the other hand)
+  const findClosestBox = (position: { x: number; y: number }, maxDistance: number = 100, exclude?: Matter.Body | null) => {
     let closestBox: Matter.Body | null = null;
     let minDistance = maxDistance;
 
     boxesRef.current.forEach(box => {
+      if (exclude && box === exclude) return;
       const dx = box.position.x - position.x;
       const dy = box.position.y - position.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
@@ -968,6 +977,13 @@ export default function HandTracker() {
     });
     boxesRef.current = [];
     boxHealthRef.current.clear();
+    grabbedBoxRef.current = null;
+    previousGrabPosRef.current = null;
+    grabVelocityRef.current = { x: 0, y: 0 };
+    leftGrabbedBoxRef.current = null;
+    leftPreviousGrabPosRef.current = null;
+    leftGrabVelocityRef.current = { x: 0, y: 0 };
+    setIsGrabbing(false);
 
     waterParticlesRef.current.forEach(particle => {
       Matter.World.remove(engineRef.current!.world, particle);
@@ -1059,6 +1075,7 @@ export default function HandTracker() {
           // Draw hand landmarks if detected
           if (results.multiHandLandmarks && results.multiHandedness) {
             setHandsDetected(results.multiHandLandmarks.length);
+            let sawLeftHandInPhysicsThisFrame = false;
 
             for (let i = 0; i < results.multiHandLandmarks.length; i++) {
               const landmarks = results.multiHandLandmarks[i];
@@ -1193,7 +1210,7 @@ export default function HandTracker() {
                   if (isPinchActive) {
                     // Try to grab a box if not already holding one
                     if (!grabbedBoxRef.current) {
-                      const closestBox = findClosestBox(pinchPosition, 80);
+                      const closestBox = findClosestBox(pinchPosition, 80, leftGrabbedBoxRef.current);
                       if (closestBox) {
                         grabbedBoxRef.current = closestBox;
                         Matter.Body.setStatic(closestBox, true);
@@ -1238,21 +1255,97 @@ export default function HandTracker() {
                 }
               }
 
-              // Left hand in drawing mode: palm facing screen = freeform, palm not facing = box.
+              // Left hand in physics mode: pinch to grab/drag/throw, or palm to push when not gripping
+              if (!isRightHand && interactionModeRef.current === 'physics' && engineRef.current) {
+                sawLeftHandInPhysicsThisFrame = true;
+                const { isPinchActive, position: leftPinchPosition } = detectPinchGesture(landmarks);
+
+                if (isPinchActive) {
+                  // Grab/drag/throw with left hand (same as right hand)
+                  if (!leftGrabbedBoxRef.current) {
+                    const closestBox = findClosestBox(leftPinchPosition, 80, grabbedBoxRef.current);
+                    if (closestBox) {
+                      leftGrabbedBoxRef.current = closestBox;
+                      Matter.Body.setStatic(closestBox, true);
+                      leftPreviousGrabPosRef.current = leftPinchPosition;
+                      setIsGrabbing(true);
+                    }
+                  } else {
+                    const box = leftGrabbedBoxRef.current;
+                    Matter.Body.setPosition(box, { x: leftPinchPosition.x, y: leftPinchPosition.y });
+                    if (leftPreviousGrabPosRef.current) {
+                      leftGrabVelocityRef.current = {
+                        x: (leftPinchPosition.x - leftPreviousGrabPosRef.current.x) * 0.5,
+                        y: (leftPinchPosition.y - leftPreviousGrabPosRef.current.y) * 0.5
+                      };
+                    }
+                    leftPreviousGrabPosRef.current = leftPinchPosition;
+                    ctx.strokeStyle = '#FF8800';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(leftPinchPosition.x, leftPinchPosition.y, 50, 0, Math.PI * 2);
+                    ctx.stroke();
+                  }
+                } else {
+                  // Release pinch – throw if holding
+                  if (leftGrabbedBoxRef.current) {
+                    Matter.Body.setStatic(leftGrabbedBoxRef.current, false);
+                    Matter.Body.setVelocity(leftGrabbedBoxRef.current, {
+                      x: leftGrabVelocityRef.current.x,
+                      y: leftGrabVelocityRef.current.y
+                    });
+                    leftGrabbedBoxRef.current = null;
+                    leftPreviousGrabPosRef.current = null;
+                    leftGrabVelocityRef.current = { x: 0, y: 0 };
+                    setIsGrabbing(false);
+                  }
+                  // Palm push when not grabbing
+                  const gesture = analyzeGesture(landmarks as Landmark[]);
+                  const palmPos = normalizeToScreen(gesture.palmCenter, canvas.width, canvas.height);
+                  const prevPos = prevLeftHandPhysicsPosRef.current;
+                  let vx = 0, vy = 0;
+                  if (prevPos) {
+                    const maxDelta = 50;
+                    vx = Math.max(-maxDelta, Math.min(maxDelta, (palmPos.x - prevPos.x) * 0.9));
+                    vy = Math.max(-maxDelta, Math.min(maxDelta, (palmPos.y - prevPos.y) * 0.9));
+                  }
+                  prevLeftHandPhysicsPosRef.current = palmPos;
+
+                  const PUSH_RADIUS = 100;
+                  const PUSH_STRENGTH = 0.018;
+                  const REPEL_STRENGTH = 0.002;
+                  boxesRef.current.forEach(box => {
+                    if (box === grabbedBoxRef.current) return;
+                    const dx = box.position.x - palmPos.x;
+                    const dy = box.position.y - palmPos.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < PUSH_RADIUS && dist > 2) {
+                      const falloff = 1 - dist / PUSH_RADIUS;
+                      Matter.Body.applyForce(box, box.position, {
+                        x: vx * PUSH_STRENGTH * falloff,
+                        y: vy * PUSH_STRENGTH * falloff
+                      });
+                      const inv = 1 / dist;
+                      Matter.Body.applyForce(box, box.position, {
+                        x: (dx * inv) * REPEL_STRENGTH * falloff,
+                        y: (dy * inv) * REPEL_STRENGTH * falloff
+                      });
+                    }
+                  });
+                }
+              } else if (!isRightHand && interactionModeRef.current === 'physics') {
+                prevLeftHandPhysicsPosRef.current = null;
+              }
+
+              // Left hand in drawing mode: color wheel when freehand (style is toggled via panel).
               if (!isRightHand && interactionModeRef.current === 'drawing') {
                 const gesture = analyzeGesture(landmarks as Landmark[]);
-                const palmFacing = gesture.isPalmFacingCamera;
-                const nextFreehand = palmFacing;
-                if (nextFreehand !== (drawingStyleRef.current === 'freehand')) {
-                  const next: DrawingStyle = nextFreehand ? 'freehand' : 'box';
-                  drawingStyleRef.current = next;
-                  setDrawingStyle(next);
-                }
 
                 // In freeform, left hand shows only color wheel (pencil is fixed; no brush menu).
                 if (drawingStyleRef.current === 'freehand' && gesture.palmArea > MIN_PALM_AREA) {
                   const palmPos = normalizeToScreen(gesture.palmCenter, canvas.width, canvas.height);
-                  const hue = ((gesture.rotation.roll + 180) % 360);
+                  // Hue from middle-finger direction: roll is palm-center → middle-finger-tip, matches wheel (0° = right = red)
+                  const hue = ((gesture.rotation.roll + 360) % 360);
                   const currentHueColor = `hsl(${hue}, 100%, 50%)`;
 
                   // Color wheel (hue ring)
@@ -1309,6 +1402,21 @@ export default function HandTracker() {
                 ctx.fillStyle = drawingStyleRef.current === 'freehand' ? '#22D3EE' : '#A78BFA';
                 ctx.fillText(drawingStyleRef.current === 'freehand' ? 'Free' : 'Box', cx, cy - 30);
                 ctx.restore();
+              }
+            }
+
+            if (interactionModeRef.current === 'physics' && !sawLeftHandInPhysicsThisFrame) {
+              prevLeftHandPhysicsPosRef.current = null;
+              if (leftGrabbedBoxRef.current) {
+                Matter.Body.setStatic(leftGrabbedBoxRef.current, false);
+                Matter.Body.setVelocity(leftGrabbedBoxRef.current, {
+                  x: leftGrabVelocityRef.current.x,
+                  y: leftGrabVelocityRef.current.y
+                });
+                leftGrabbedBoxRef.current = null;
+                leftPreviousGrabPosRef.current = null;
+                leftGrabVelocityRef.current = { x: 0, y: 0 };
+                setIsGrabbing(false);
               }
             }
 
@@ -1468,6 +1576,12 @@ export default function HandTracker() {
                     grabVelocityRef.current = { x: 0, y: 0 };
                     setIsGrabbing(false);
                   }
+                  if (leftGrabbedBoxRef.current) {
+                    Matter.Body.setStatic(leftGrabbedBoxRef.current, false);
+                    leftGrabbedBoxRef.current = null;
+                    leftPreviousGrabPosRef.current = null;
+                    leftGrabVelocityRef.current = { x: 0, y: 0 };
+                  }
                   pinchStartRef.current = null;
                   pinchCurrentRef.current = null;
                   setIsPinching(false);
@@ -1516,13 +1630,19 @@ export default function HandTracker() {
             }
             currentStrokeRef.current = [];
 
-            // Release grabbed box if no hands detected
+            // Release grabbed boxes if no hands detected
             if (grabbedBoxRef.current) {
               Matter.Body.setStatic(grabbedBoxRef.current, false);
               grabbedBoxRef.current = null;
               previousGrabPosRef.current = null;
               grabVelocityRef.current = { x: 0, y: 0 };
               setIsGrabbing(false);
+            }
+            if (leftGrabbedBoxRef.current) {
+              Matter.Body.setStatic(leftGrabbedBoxRef.current, false);
+              leftGrabbedBoxRef.current = null;
+              leftPreviousGrabPosRef.current = null;
+              leftGrabVelocityRef.current = { x: 0, y: 0 };
             }
 
             // Reset gravity if no hands detected
@@ -1761,13 +1881,43 @@ export default function HandTracker() {
               ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30'
               : 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30'
               }`}>
-              {interactionMode === 'drawing' ? `Drawing (${drawingStyle === 'freehand' ? 'Free' : 'Box'})` : 'Physics'}
+              {interactionMode === 'drawing' ? 'Drawing' : 'Physics'}
             </span>
           </div>
           <p className="mt-1 text-[10px] text-zinc-500">Cross arms to toggle</p>
         </div>
 
         {interactionMode === 'drawing' && (
+          <>
+          <div className="px-4 py-3 border-b border-white/5 space-y-2">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Draw style</span>
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                onClick={() => {
+                  setDrawingStyle('freehand');
+                  drawingStyleRef.current = 'freehand';
+                }}
+                className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${drawingStyle === 'freehand'
+                  ? 'bg-cyan-500/20 text-cyan-400 ring-1 ring-cyan-500/30'
+                  : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
+                  }`}
+              >
+                Free
+              </button>
+              <button
+                onClick={() => {
+                  setDrawingStyle('box');
+                  drawingStyleRef.current = 'box';
+                }}
+                className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${drawingStyle === 'box'
+                  ? 'bg-cyan-500/20 text-cyan-400 ring-1 ring-cyan-500/30'
+                  : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
+                  }`}
+              >
+                Box
+              </button>
+            </div>
+          </div>
           <div className="px-4 py-3 border-b border-white/5 space-y-3">
             <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Material</span>
             <div className="flex flex-wrap gap-1.5">
@@ -1822,6 +1972,7 @@ export default function HandTracker() {
               </div>
             )}
           </div>
+          </>
         )}
 
         <div className="px-4 py-3 flex flex-col gap-2">
