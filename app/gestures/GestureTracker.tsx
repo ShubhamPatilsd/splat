@@ -98,15 +98,17 @@ export default function GestureTracker() {
   // Drawing mode state
   const [isDrawingMode, setIsDrawingMode] = useState(false);
   const [currentColor, setCurrentColor] = useState('#FF0000'); // Default red
+  const [lockedColor, setLockedColor] = useState('#FF0000'); // Color locked in by left hand pinch
   const isDrawingModeRef = useRef(false);
   const currentColorRef = useRef('#FF0000');
-  const drawingStrokesRef = useRef<Array<{x: number, y: number, color: string}[]>>([]);
-  const currentStrokeRef = useRef<{x: number, y: number, color: string}[]>([]);
+  const drawingStrokesRef = useRef<Array<{ x: number, y: number, color: string }[]>>([]);
+  const currentStrokeRef = useRef<{ x: number, y: number, color: string }[]>([]);
   const isPinchingRef = useRef(false);
+  const prevLeftHandPinchRef = useRef(false);
 
-  // Sync refs with state
+  // Sync refs with state - use locked color for drawing
   isDrawingModeRef.current = isDrawingMode;
-  currentColorRef.current = currentColor;
+  currentColorRef.current = lockedColor; // Use locked color for actual drawing
 
   // Detect gesture combinations
   const detectGestureCombos = useCallback((handData: HandData[]) => {
@@ -167,7 +169,7 @@ export default function GestureTracker() {
 
       // Peace sign detection
       if (g.fingerStates.index && g.fingerStates.middle &&
-          !g.fingerStates.ring && !g.fingerStates.pinky) {
+        !g.fingerStates.ring && !g.fingerStates.pinky) {
         combos.push({
           name: `${hand.handedness}: Peace Sign ✌️`,
           active: true,
@@ -177,7 +179,7 @@ export default function GestureTracker() {
 
       // Pointing
       if (g.fingerStates.index && !g.fingerStates.middle &&
-          !g.fingerStates.ring && !g.fingerStates.pinky) {
+        !g.fingerStates.ring && !g.fingerStates.pinky) {
         combos.push({
           name: `${hand.handedness}: Pointing 👉`,
           active: true,
@@ -210,7 +212,7 @@ export default function GestureTracker() {
 
       // Opposite rotations
       if ((hand1.gesture.rotation.roll > 30 && hand2.gesture.rotation.roll < -30) ||
-          (hand1.gesture.rotation.roll < -30 && hand2.gesture.rotation.roll > 30)) {
+        (hand1.gesture.rotation.roll < -30 && hand2.gesture.rotation.roll > 30)) {
         combos.push({
           name: 'Opposite Twists (Zoom Gesture)',
           active: true,
@@ -255,7 +257,7 @@ export default function GestureTracker() {
 
       // Check splat conditions: both hands open, palms forward, AND both getting bigger
       const isSplatPose = hand1.gesture.isOpen && hand2.gesture.isOpen &&
-                          hand1.gesture.isPalmFacingCamera && hand2.gesture.isPalmFacingCamera;
+        hand1.gesture.isPalmFacingCamera && hand2.gesture.isPalmFacingCamera;
       const handsMovingCloser = leftGettingBigger && rightGettingBigger;
 
       // Detect onset (transition from not-splat to splat) with cooldown
@@ -388,36 +390,68 @@ export default function GestureTracker() {
               });
 
               // DRAWING MODE: Handle drawing with right hand pinch
-              if (isDrawingModeRef.current && isRightHand && gesture.pinches.length > 0) {
-                const pinch = gesture.pinches[0]; // Use first pinch
-                if (pinch.isPinching && pinch.strength > 0.5) {
+              if (isDrawingModeRef.current && isRightHand) {
+                // Check for thumb+index pinch specifically
+                const thumbIndexPinch = gesture.pinches.find(
+                  p => p.fingers.includes('thumb') && p.fingers.includes('index')
+                );
+
+                if (thumbIndexPinch) {
                   const screenPos = normalizeToScreen(
-                    pinch.position,
+                    thumbIndexPinch.position,
                     canvas.width,
                     canvas.height
                   );
 
-                  if (!isPinchingRef.current) {
-                    // Start new stroke
-                    isPinchingRef.current = true;
-                    currentStrokeRef.current = [{x: screenPos.x, y: screenPos.y, color: currentColorRef.current}];
-                  } else {
-                    // Continue stroke
-                    currentStrokeRef.current.push({x: screenPos.x, y: screenPos.y, color: currentColorRef.current});
-                  }
+                  // ALWAYS show circle indicator when thumb+index are detected together
+                  const circleRadius = 20 + (thumbIndexPinch.strength * 15);
 
-                  // Draw cursor indicator when actively drawing
+                  // Only draw/active if pinch strength is sufficient (slightly buffered)
+                  // Lower threshold to make it easier to start drawing when circle appears
+                  const isReadyToDraw = thumbIndexPinch.strength > 0.2;
+
+                  // Draw pulsing circle
                   ctx.beginPath();
-                  ctx.arc(screenPos.x, screenPos.y, 12, 0, 2 * Math.PI);
-                  ctx.strokeStyle = currentColorRef.current;
-                  ctx.lineWidth = 3;
+                  ctx.arc(screenPos.x, screenPos.y, circleRadius, 0, 2 * Math.PI);
+                  ctx.strokeStyle = isReadyToDraw ? currentColorRef.current : '#FFFF00'; // Yellow if not quite pinching hard enough
+                  ctx.lineWidth = isReadyToDraw ? 5 : 2;
                   ctx.stroke();
+
+                  // Inner filled circle
                   ctx.beginPath();
-                  ctx.arc(screenPos.x, screenPos.y, 4, 0, 2 * Math.PI);
+                  ctx.arc(screenPos.x, screenPos.y, 8, 0, 2 * Math.PI);
                   ctx.fillStyle = currentColorRef.current;
                   ctx.fill();
+
+                  // DRAWING LOGIC
+                  if (isReadyToDraw) {
+                    if (!isPinchingRef.current) {
+                      // Start new stroke
+                      isPinchingRef.current = true;
+                      currentStrokeRef.current = [{ x: screenPos.x, y: screenPos.y, color: currentColorRef.current }];
+                    } else {
+                      // Continue stroke - add point every frame while pinching
+                      currentStrokeRef.current.push({ x: screenPos.x, y: screenPos.y, color: currentColorRef.current });
+                    }
+
+                    // Add "DRAWING" text indicator
+                    ctx.font = 'bold 16px sans-serif';
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.strokeStyle = '#000000';
+                    ctx.lineWidth = 4;
+                    ctx.strokeText('DRAWING', screenPos.x, screenPos.y - 40);
+                    ctx.fillText('DRAWING', screenPos.x, screenPos.y - 40);
+                  } else {
+                    // Show "READY" when circle appears but not drawing yet
+                    ctx.font = 'bold 14px sans-serif';
+                    ctx.fillStyle = '#FFFF00';
+                    ctx.strokeStyle = '#000000';
+                    ctx.lineWidth = 3;
+                    ctx.strokeText('PINCH', screenPos.x, screenPos.y - 35);
+                    ctx.fillText('PINCH', screenPos.x, screenPos.y - 35);
+                  }
                 } else if (isPinchingRef.current) {
-                  // End stroke
+                  // End stroke when pinch is released
                   isPinchingRef.current = false;
                   if (currentStrokeRef.current.length > 1) {
                     drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
@@ -433,71 +467,112 @@ export default function GestureTracker() {
                 }
               }
 
-              // Draw COLOR PICKER for LEFT HAND when palm is open in DRAWING MODE
-              if (!isRightHand && gesture.isOpen && isDrawingModeRef.current) {
+              // LEFT HAND COLOR PICKER in DRAWING MODE
+              if (!isRightHand && isDrawingModeRef.current) {
                 const palmPos = normalizeToScreen(
                   gesture.palmCenter,
                   canvas.width,
                   canvas.height
                 );
 
-                const hueRadius = 120;
-                const innerRadius = 40;
+                // Use hand rotation to automatically change hue (0-360 degrees)
+                // Map rotation angle to hue (normalize -180 to 180 → 0 to 360)
+                const hue = ((gesture.rotation.roll + 180) % 360);
+                const currentHueColor = `hsl(${hue}, 100%, 50%)`;
 
-                // Draw smooth continuous hue wheel (360 segments = 1 degree each)
-                const segments = 360;
+                // Update current color as hand rotates
+                setCurrentColor(currentHueColor);
+
+                // Draw smooth continuous hue wheel ring
+                const wheelRadius = 80;
+                const segments = 60; // optimize rendering
                 for (let i = 0; i < segments; i++) {
-                  const startAngle = (i / segments) * Math.PI * 2 - Math.PI / 2;
-                  const endAngle = ((i + 1) / segments) * Math.PI * 2 - Math.PI / 2;
-                  const hue = (i / segments) * 360;
+                  const startAngle = (i / segments) * Math.PI * 2;
+                  const endAngle = ((i + 1) / segments) * Math.PI * 2;
+                  // Ensure the wheel aligns with the rotation logic
+                  // Hue logic was: ((gesture.rotation.roll + 180) % 360) where roll is -180 to 180
+                  // So top (-90 deg or -PI/2) should be 0 hue (Red) to match?
+                  // Actually let's just draw the full variety
+                  const segmentHue = (i / segments) * 360;
 
                   ctx.beginPath();
-                  ctx.arc(palmPos.x, palmPos.y, hueRadius, startAngle, endAngle);
-                  ctx.arc(palmPos.x, palmPos.y, innerRadius, endAngle, startAngle, true);
-                  ctx.closePath();
-                  ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+                  ctx.arc(palmPos.x, palmPos.y, wheelRadius, startAngle, endAngle);
+                  ctx.arc(palmPos.x, palmPos.y, wheelRadius - 10, endAngle, startAngle, true);
+                  ctx.fillStyle = `hsl(${segmentHue}, 100%, 50%)`;
                   ctx.fill();
                 }
 
-                // Draw center circle showing current color
+                // Draw large color indicator on palm
+                const indicatorRadius = 60;
+
+                // Outer ring showing current hue
                 ctx.beginPath();
-                ctx.arc(palmPos.x, palmPos.y, innerRadius, 0, 2 * Math.PI);
-                ctx.fillStyle = currentColor;
+                ctx.arc(palmPos.x, palmPos.y, indicatorRadius, 0, 2 * Math.PI);
+                ctx.fillStyle = currentHueColor;
                 ctx.fill();
                 ctx.strokeStyle = '#FFFFFF';
-                ctx.lineWidth = 3;
+                ctx.lineWidth = 4;
                 ctx.stroke();
 
-                // Check if pinching to select color
-                if (gesture.pinches.length > 0) {
-                  const pinch = gesture.pinches[0];
-                  if (pinch.isPinching && pinch.strength > 0.7) {
-                    const pinchPos = normalizeToScreen(
-                      pinch.position,
-                      canvas.width,
-                      canvas.height
-                    );
-
-                    // Calculate angle from palm center to pinch position
-                    const dx = pinchPos.x - palmPos.x;
-                    const dy = pinchPos.y - palmPos.y;
-                    const angle = Math.atan2(dy, dx) + Math.PI / 2; // Offset by 90deg
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-
-                    // Only select if pinching on the hue ring
-                    if (distance >= innerRadius && distance <= hueRadius) {
-                      const hue = ((angle + Math.PI) / (Math.PI * 2)) * 360;
-                      const selectedColor = `hsl(${hue}, 100%, 50%)`;
-                      setCurrentColor(selectedColor);
-
-                      // Visual feedback
-                      ctx.beginPath();
-                      ctx.arc(pinchPos.x, pinchPos.y, 15, 0, 2 * Math.PI);
-                      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-                      ctx.fill();
-                    }
-                  }
+                // Inner circle showing locked color (if different)
+                if (lockedColor !== currentHueColor) {
+                  ctx.beginPath();
+                  ctx.arc(palmPos.x, palmPos.y, indicatorRadius * 0.5, 0, 2 * Math.PI);
+                  ctx.fillStyle = lockedColor;
+                  ctx.fill();
+                  ctx.strokeStyle = '#FFFFFF';
+                  ctx.lineWidth = 2;
+                  ctx.stroke();
                 }
+
+                // Show hue value
+                ctx.font = 'bold 14px sans-serif';
+                ctx.fillStyle = '#000000';
+                ctx.strokeStyle = '#FFFFFF';
+                ctx.lineWidth = 3;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.strokeText(`${Math.round(hue)}°`, palmPos.x, palmPos.y);
+                ctx.fillText(`${Math.round(hue)}°`, palmPos.x, palmPos.y);
+
+                // Detect left hand pinch to lock in color
+                const leftHandPinch = gesture.pinches.find(
+                  p => p.fingers.includes('thumb') && p.fingers.includes('index')
+                );
+
+                if (leftHandPinch && leftHandPinch.strength > 0.5) {
+                  if (!prevLeftHandPinchRef.current) {
+                    // Pinch started - lock in current color
+                    setLockedColor(currentHueColor);
+                    prevLeftHandPinchRef.current = true;
+
+                    // Visual feedback
+                    ctx.beginPath();
+                    ctx.arc(palmPos.x, palmPos.y, indicatorRadius + 20, 0, 2 * Math.PI);
+                    ctx.strokeStyle = '#00FF00';
+                    ctx.lineWidth = 6;
+                    ctx.stroke();
+
+                    ctx.font = 'bold 16px sans-serif';
+                    ctx.fillStyle = '#00FF00';
+                    ctx.strokeStyle = '#000000';
+                    ctx.lineWidth = 3;
+                    ctx.strokeText('LOCKED', palmPos.x, palmPos.y + indicatorRadius + 35);
+                    ctx.fillText('LOCKED', palmPos.x, palmPos.y + indicatorRadius + 35);
+                  }
+                } else {
+                  prevLeftHandPinchRef.current = false;
+                }
+
+                // Instruction text
+                ctx.font = '12px sans-serif';
+                ctx.fillStyle = '#FFFFFF';
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 2;
+                ctx.strokeText('Rotate hand to change hue', palmPos.x, palmPos.y - indicatorRadius - 20);
+                ctx.fillText('Rotate hand to change hue', palmPos.x, palmPos.y - indicatorRadius - 20);
+                ctx.strokeText('Pinch to lock color', palmPos.x, palmPos.y + indicatorRadius + 20);
+                ctx.fillText('Pinch to lock color', palmPos.x, palmPos.y + indicatorRadius + 20);
               }
 
               // Left hand: detect pinch to select tool (when NOT in drawing mode)
@@ -780,11 +855,10 @@ export default function GestureTracker() {
             {/* Drawing Mode Toggle */}
             <button
               onClick={() => setIsDrawingMode(!isDrawingMode)}
-              className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
-                isDrawingMode
+              className={`px-4 py-2 rounded-lg font-semibold transition-colors ${isDrawingMode
                   ? 'bg-purple-600 hover:bg-purple-700 text-white'
                   : 'bg-gray-700 hover:bg-gray-600 text-white'
-              }`}
+                }`}
             >
               {isDrawingMode ? '🎨 Drawing Mode' : '👋 Gesture Mode'}
             </button>
@@ -913,13 +987,14 @@ export default function GestureTracker() {
                 {isDrawingMode ? (
                   <>
                     <p className="font-semibold text-purple-400 mb-2">🎨 Drawing Mode Instructions:</p>
-                    <p>• <span className="text-green-400 font-semibold">RIGHT HAND</span>: Pinch thumb + index finger to draw</p>
-                    <p>• Pinch strength 50%+ starts drawing, release to end stroke</p>
-                    <p>• Circular cursor shows current drawing position</p>
-                    <p>• <span className="text-red-400 font-semibold">LEFT HAND</span>: Open palm shows smooth color picker wheel</p>
-                    <p>• Pinch on the color wheel to select a new color (70%+ strength)</p>
-                    <p>• Current color shown in center circle</p>
-                    <p>• Click <span className="text-red-400 font-semibold">"Clear Canvas"</span> button to erase all strokes</p>
+                    <p>• <span className="text-green-400 font-semibold">RIGHT HAND</span>: Bring thumb + index together</p>
+                    <p>• Yellow circle with "PINCH" appears when fingers are close</p>
+                    <p>• Pinch slightly tighter to draw (White circle + "DRAWING")</p>
+                    <p>• Move hand while pinching - line follows continuously</p>
+                    <p>• <span className="text-red-400 font-semibold">LEFT HAND</span>: Rotate hand to browse color wheel</p>
+                    <p>• <span className="text-yellow-400 font-semibold">Pinch left hand to LOCK</span> the selected color</p>
+                    <p>• Current brush color is shown in the center circle</p>
+                    <p>• Click <span className="text-red-400 font-semibold">"Clear Canvas"</span> to erase all strokes</p>
                   </>
                 ) : (
                   <>
@@ -1124,11 +1199,10 @@ export default function GestureTracker() {
                   {Object.entries(hand.gesture.fingerStates).map(([finger, extended]) => (
                     <div
                       key={finger}
-                      className={`text-center py-2 rounded text-xs font-semibold ${
-                        extended
+                      className={`text-center py-2 rounded text-xs font-semibold ${extended
                           ? 'bg-green-600 text-white'
                           : 'bg-gray-700 text-gray-500'
-                      }`}
+                        }`}
                     >
                       {finger.charAt(0).toUpperCase()}
                     </div>
