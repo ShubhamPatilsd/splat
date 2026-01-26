@@ -41,8 +41,8 @@ interface MenuItem {
 
 // Radial menu configuration
 // Just set the total angle range and menu items - segments are auto-calculated!
-const MENU_START_ANGLE = -155;  // Start angle for entire menu (degrees)
-const MENU_END_ANGLE = -10;      // End angle for entire menu (degrees)
+const MENU_START_ANGLE = -125;  // Start angle for entire menu (degrees)
+const MENU_END_ANGLE = 10;      // End angle for entire menu (degrees)
 const SENSITIVITY = 1.5;         // Rotation sensitivity multiplier (higher = more sensitive)
 
 const menuItemsConfig = [
@@ -62,14 +62,11 @@ const menuItems: MenuItem[] = menuItemsConfig.map((item, index) => ({
   endAngle: MENU_START_ANGLE + (segmentSize * (index + 1)),
 }));
 
-// Get selected menu item based on roll angle
-const getSelectedMenuItem = (rollAngle: number): MenuItem | null => {
-  // Apply sensitivity multiplier to make rotation more responsive
-  const adjustedAngle = rollAngle * SENSITIVITY;
-
-  // Find which menu item range the adjusted angle falls into
+// Get selected menu item based on finger angle
+const getSelectedMenuItem = (fingerAngle: number): MenuItem | null => {
+  // Find which menu item range the finger angle falls into
   for (const item of menuItems) {
-    if (adjustedAngle >= item.startAngle && adjustedAngle < item.endAngle) {
+    if (fingerAngle >= item.startAngle && fingerAngle < item.endAngle) {
       return item;
     }
   }
@@ -87,6 +84,16 @@ export default function GestureTracker() {
   const [splatActive, setSplatActive] = useState(false);
   const prevSplatStateRef = useRef(false);
   const splatCooldownRef = useRef(false);
+
+  // Track selected brush tool from radial menu
+  const [selectedTool, setSelectedTool] = useState<string>('Pencil');
+  const prevLeftPinchRef = useRef(false);
+  const hoveredToolRef = useRef<string>('Pencil'); // Track what tool is being hovered
+
+  // Track hand sizes for splat detection (detecting hands moving closer)
+  const handSizeHistoryRef = useRef<{ left: number[]; right: number[] }>({ left: [], right: [] });
+  const SPLAT_SIZE_INCREASE_THRESHOLD = 0.015; // Minimum size increase to count as "moving closer"
+  const SPLAT_HISTORY_LENGTH = 5; // Number of frames to track for velocity
 
   // Detect gesture combinations
   const detectGestureCombos = useCallback((handData: HandData[]) => {
@@ -198,15 +205,55 @@ export default function GestureTracker() {
         });
       }
 
-      // SPLAT GESTURE: Both hands open with palms facing camera simultaneously
+      // SPLAT GESTURE: Both hands open with palms facing camera AND moving closer simultaneously
+
+      // Determine which hand is left/right
+      const leftHand = hand1.handedness === 'Left' ? hand1 : hand2;
+      const rightHand = hand1.handedness === 'Right' ? hand1 : hand2;
+
+      // Track hand size history
+      handSizeHistoryRef.current.left.push(leftHand.gesture.handSize);
+      handSizeHistoryRef.current.right.push(rightHand.gesture.handSize);
+
+      // Keep only recent history
+      if (handSizeHistoryRef.current.left.length > SPLAT_HISTORY_LENGTH) {
+        handSizeHistoryRef.current.left.shift();
+      }
+      if (handSizeHistoryRef.current.right.length > SPLAT_HISTORY_LENGTH) {
+        handSizeHistoryRef.current.right.shift();
+      }
+
+      // Calculate if hands are getting bigger (moving closer to camera)
+      const leftHistory = handSizeHistoryRef.current.left;
+      const rightHistory = handSizeHistoryRef.current.right;
+
+      let leftGettingBigger = false;
+      let rightGettingBigger = false;
+
+      if (leftHistory.length >= 3) {
+        const leftSizeChange = leftHistory[leftHistory.length - 1] - leftHistory[0];
+        leftGettingBigger = leftSizeChange > SPLAT_SIZE_INCREASE_THRESHOLD;
+      }
+
+      if (rightHistory.length >= 3) {
+        const rightSizeChange = rightHistory[rightHistory.length - 1] - rightHistory[0];
+        rightGettingBigger = rightSizeChange > SPLAT_SIZE_INCREASE_THRESHOLD;
+      }
+
+      // Check splat conditions: both hands open, palms forward, AND both getting bigger
       const isSplatPose = hand1.gesture.isOpen && hand2.gesture.isOpen &&
                           hand1.gesture.isPalmFacingCamera && hand2.gesture.isPalmFacingCamera;
+      const handsMovingCloser = leftGettingBigger && rightGettingBigger;
 
       // Detect onset (transition from not-splat to splat) with cooldown
-      if (isSplatPose && !prevSplatStateRef.current && !splatCooldownRef.current) {
+      if (isSplatPose && handsMovingCloser && !prevSplatStateRef.current && !splatCooldownRef.current) {
         // Trigger splat!
         setSplatActive(true);
         splatCooldownRef.current = true;
+
+        // Clear size history after splat to require new forward motion
+        handSizeHistoryRef.current.left = [];
+        handSizeHistoryRef.current.right = [];
 
         // Reset splat visual after animation
         setTimeout(() => {
@@ -225,10 +272,11 @@ export default function GestureTracker() {
         });
       }
 
-      prevSplatStateRef.current = isSplatPose;
+      prevSplatStateRef.current = isSplatPose && handsMovingCloser;
     } else {
       // Reset splat state when not detecting 2 hands
       prevSplatStateRef.current = false;
+      handSizeHistoryRef.current = { left: [], right: [] };
     }
 
     setGestureCombos(combos);
@@ -326,24 +374,60 @@ export default function GestureTracker() {
                 }
               });
 
-              // Draw radial menu for LEFT HAND when palm is open
-              if (!isRightHand && gesture.isOpen) {
+              // Left hand: detect pinch to select tool
+              if (!isRightHand) {
+                // Check for thumb+index pinch
+                const hasThumbIndexPinch = gesture.pinches.some(
+                  p => p.fingers.includes('thumb') && p.fingers.includes('index') && p.strength > 0.7
+                );
+
+                // Detect pinch onset (transition from not pinching to pinching)
+                if (hasThumbIndexPinch && !prevLeftPinchRef.current) {
+                  // Select the currently hovered tool
+                  setSelectedTool(hoveredToolRef.current);
+                }
+                prevLeftPinchRef.current = hasThumbIndexPinch;
+              }
+
+              // Draw radial menu for LEFT HAND when palm area is large enough
+              // This allows menu to stay open during pinch (palm stays visible)
+              const MIN_PALM_AREA = 0.002; // Minimum palm area to show menu
+              const showMenu = !isRightHand && gesture.palmArea > MIN_PALM_AREA;
+
+              if (showMenu) {
                 const palmPos = normalizeToScreen(
                   gesture.palmCenter,
                   canvas.width,
                   canvas.height
                 );
 
+                // Calculate middle finger angle from landmarks (screen space)
+                const middleTip = landmarks[HandLandmark.MIDDLE_FINGER_TIP];
+                const middleTipScreen = normalizeToScreen(
+                  { x: middleTip.x, y: middleTip.y },
+                  canvas.width,
+                  canvas.height
+                );
+                const dx = middleTipScreen.x - palmPos.x;
+                const dy = middleTipScreen.y - palmPos.y;
+                const middleFingerAngle = Math.atan2(dy, dx) * (180 / Math.PI); // Convert to degrees
+
                 const menuRadius = 120;
                 const innerRadius = 40;
-                const selectedItem = getSelectedMenuItem(gesture.rotation.roll);
+                const hoveredItem = getSelectedMenuItem(middleFingerAngle);
+
+                // Update hovered tool ref for pinch selection
+                if (hoveredItem) {
+                  hoveredToolRef.current = hoveredItem.name;
+                }
 
                 // Draw menu segments
                 menuItems.forEach((item) => {
                   // Draw at actual angles (no offset)
                   const startAngle = item.startAngle * Math.PI / 180;
                   const endAngle = item.endAngle * Math.PI / 180;
-                  const isSelected = selectedItem?.name === item.name;
+                  const isHovered = hoveredItem?.name === item.name;
+                  const isLockedIn = selectedTool === item.name;
 
                   // Draw segment
                   ctx.beginPath();
@@ -351,13 +435,27 @@ export default function GestureTracker() {
                   ctx.arc(palmPos.x, palmPos.y, innerRadius, endAngle, startAngle, true);
                   ctx.closePath();
 
-                  // Fill with color (brighter if selected)
-                  ctx.fillStyle = isSelected ? item.color : item.color + '80'; // 80 = 50% opacity
+                  // Fill with color (brighter if hovered, even brighter if locked in)
+                  if (isLockedIn) {
+                    ctx.fillStyle = item.color; // Full color for locked-in tool
+                  } else if (isHovered) {
+                    ctx.fillStyle = item.color + 'CC'; // 80% opacity for hovered
+                  } else {
+                    ctx.fillStyle = item.color + '60'; // 40% opacity for others
+                  }
                   ctx.fill();
 
-                  // Outline
-                  ctx.strokeStyle = isSelected ? '#FFFFFF' : '#FFFFFF40';
-                  ctx.lineWidth = isSelected ? 3 : 1;
+                  // Outline - thick white for locked-in, medium for hovered
+                  if (isLockedIn) {
+                    ctx.strokeStyle = '#00FF00'; // Green outline for locked-in
+                    ctx.lineWidth = 4;
+                  } else if (isHovered) {
+                    ctx.strokeStyle = '#FFFFFF';
+                    ctx.lineWidth = 2;
+                  } else {
+                    ctx.strokeStyle = '#FFFFFF40';
+                    ctx.lineWidth = 1;
+                  }
                   ctx.stroke();
 
                   // Draw icon at actual angle (no offset)
@@ -367,7 +465,7 @@ export default function GestureTracker() {
                   const iconX = palmPos.x + Math.cos(midAngle) * iconRadius;
                   const iconY = palmPos.y + Math.sin(midAngle) * iconRadius;
 
-                  ctx.font = isSelected ? 'bold 24px sans-serif' : '20px sans-serif';
+                  ctx.font = (isHovered || isLockedIn) ? 'bold 24px sans-serif' : '20px sans-serif';
                   ctx.textAlign = 'center';
                   ctx.textBaseline = 'middle';
                   ctx.fillStyle = '#FFFFFF';
@@ -396,38 +494,34 @@ export default function GestureTracker() {
                 ctx.lineWidth = 2;
                 ctx.stroke();
 
-                // Draw selected item name in center
-                if (selectedItem) {
-                  ctx.font = 'bold 12px sans-serif';
-                  ctx.fillStyle = '#FFFFFF';
-                  ctx.textAlign = 'center';
-                  ctx.textBaseline = 'middle';
-                  ctx.fillText(selectedItem.name, palmPos.x, palmPos.y - 8);
+                // Draw center info - show locked-in tool and hovered tool
+                ctx.font = 'bold 11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
 
-                  // Debug: show raw and adjusted roll angles
-                  const adjustedRoll = gesture.rotation.roll * SENSITIVITY;
-                  ctx.font = '9px monospace';
-                  ctx.fillStyle = '#AAAAAA';
-                  ctx.fillText(`${adjustedRoll.toFixed(0)}°`, palmPos.x, palmPos.y + 8);
+                // Show locked-in tool
+                ctx.fillStyle = '#00FF00';
+                ctx.fillText(selectedTool, palmPos.x, palmPos.y - 10);
+
+                // Show hovered tool (if different from locked-in)
+                if (hoveredItem && hoveredItem.name !== selectedTool) {
+                  ctx.fillStyle = '#FFFFFF';
+                  ctx.font = '9px sans-serif';
+                  ctx.fillText(`→ ${hoveredItem.name}`, palmPos.x, palmPos.y + 6);
                 }
 
-                // Draw roll indicator line pointing towards middle finger tip
-                const middleTip = landmarks[HandLandmark.MIDDLE_FINGER_TIP];
-                const middleTipScreen = normalizeToScreen(
-                  { x: middleTip.x, y: middleTip.y },
-                  canvas.width,
-                  canvas.height
-                );
+                // Hint text
+                ctx.font = '7px sans-serif';
+                ctx.fillStyle = '#888888';
+                ctx.fillText('pinch to select', palmPos.x, palmPos.y + 18);
 
-                // Calculate angle from palm center to middle finger tip
-                const dx = middleTipScreen.x - palmPos.x;
-                const dy = middleTipScreen.y - palmPos.y;
-                const actualAngle = Math.atan2(dy, dx);
+                // Draw indicator line pointing to middle finger (same angle as selection)
+                const lineAngle = middleFingerAngle * Math.PI / 180;
 
-                const lineStartX = palmPos.x + Math.cos(actualAngle) * innerRadius;
-                const lineStartY = palmPos.y + Math.sin(actualAngle) * innerRadius;
-                const lineEndX = palmPos.x + Math.cos(actualAngle) * menuRadius;
-                const lineEndY = palmPos.y + Math.sin(actualAngle) * menuRadius;
+                const lineStartX = palmPos.x + Math.cos(lineAngle) * innerRadius;
+                const lineStartY = palmPos.y + Math.sin(lineAngle) * innerRadius;
+                const lineEndX = palmPos.x + Math.cos(lineAngle) * menuRadius;
+                const lineEndY = palmPos.y + Math.sin(lineAngle) * menuRadius;
 
                 ctx.beginPath();
                 ctx.moveTo(lineStartX, lineStartY);
@@ -524,9 +618,17 @@ export default function GestureTracker() {
             <h1 className="text-2xl font-bold text-white">Gesture Tracker</h1>
             <p className="text-sm text-gray-400">Real-time hand gesture detection and combinations</p>
           </div>
-          <div className="text-right">
-            <div className="text-sm text-gray-400">Hands Detected</div>
-            <div className="text-3xl font-bold text-white">{hands.length}</div>
+          <div className="flex items-center gap-6">
+            <div className="text-center">
+              <div className="text-sm text-gray-400">Selected Tool</div>
+              <div className="text-2xl font-bold text-green-400">
+                {menuItemsConfig.find(m => m.name === selectedTool)?.icon} {selectedTool}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-sm text-gray-400">Hands Detected</div>
+              <div className="text-3xl font-bold text-white">{hands.length}</div>
+            </div>
           </div>
         </div>
       </div>
@@ -631,10 +733,9 @@ export default function GestureTracker() {
                 <p className="font-semibold text-purple-400 mt-3 mb-2">🎯 Radial Menu Controls:</p>
                 <p>• Show your <span className="text-red-400 font-semibold">LEFT HAND</span> with palm open (all fingers spread)</p>
                 <p>• Radial menu appears on your palm center ({Math.round(MENU_END_ANGLE - MENU_START_ANGLE)}° range, {menuItemsConfig.length} segments)</p>
-                <p>• <span className="text-yellow-400 font-semibold">Rotate your wrist left/right</span> to select tools</p>
-                <p>• Uses <span className="text-green-400 font-semibold">MIDDLE FINGER</span> tracking with {SENSITIVITY}× sensitivity</p>
-                <p>• <span className="text-blue-400">🖊️ Pen</span> → <span className="text-green-400">✏️ Pencil</span> (pointing up) → <span className="text-orange-400">🖌️ Brush</span> → <span className="text-red-400">🧹 Eraser</span></p>
-                <p>• Yellow line and angle value show adjusted rotation</p>
+                <p>• <span className="text-yellow-400 font-semibold">Point your middle finger</span> to hover over tools</p>
+                <p>• <span className="text-green-400 font-semibold">Pinch (thumb + index)</span> to lock in the hovered tool</p>
+                <p>• <span className="text-blue-400">🖊️ Pen</span> → <span className="text-green-400">✏️ Pencil</span> → <span className="text-orange-400">🖌️ Brush</span> → <span className="text-red-400">🧹 Eraser</span></p>
               </div>
             </div>
           </div>
@@ -655,7 +756,7 @@ export default function GestureTracker() {
                 <h3 className="text-xl font-bold text-white">
                   {hand.handedness} Hand
                 </h3>
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   {hand.gesture.isOpen && (
                     <span className="px-2 py-1 bg-blue-600 rounded text-xs font-semibold text-white">
                       OPEN
@@ -671,11 +772,14 @@ export default function GestureTracker() {
                       PALM FORWARD
                     </span>
                   )}
+                  <span className="px-2 py-1 bg-gray-700 rounded text-xs font-mono text-gray-300">
+                    Palm: {(hand.gesture.palmArea * 1000).toFixed(1)}
+                  </span>
                 </div>
               </div>
 
-              {/* Radial Menu Selection - Only for Left Hand when Open */}
-              {hand.handedness === 'Left' && hand.gesture.isOpen && (
+              {/* Radial Menu Selection - Only for Left Hand when palm area is large enough */}
+              {hand.handedness === 'Left' && hand.gesture.palmArea > 0.002 && (
                 <div className="mb-4 p-3 bg-gradient-to-r from-purple-900/50 to-blue-900/50 rounded-lg border border-purple-500/50">
                   <h4 className="text-sm font-semibold text-purple-300 mb-2 flex items-center gap-2">
                     🎯 Radial Menu Active

@@ -46,9 +46,11 @@ export interface GestureState {
   pinches: PinchGesture[];
   rotation: HandRotation;
   palmCenter: { x: number; y: number };
+  palmArea: number; // area of palm polygon (normalized, larger = hand closer/more open)
   isOpen: boolean; // all fingers extended
   isFist: boolean; // all fingers closed
   isPalmFacingCamera: boolean; // palm facing toward the camera
+  handSize: number; // normalized hand size (larger = closer to camera)
   fingerStates: {
     thumb: boolean;
     index: boolean;
@@ -239,6 +241,32 @@ export function calculatePalmCenter(landmarks: Landmark[]): { x: number; y: numb
 }
 
 /**
+ * Calculate palm area using the shoelace formula
+ * Uses the 5 central palm landmarks: WRIST + 4 finger MCPs
+ * Returns normalized area (larger = palm more open/closer to camera)
+ */
+export function calculatePalmArea(landmarks: Landmark[]): number {
+  // Get the 5 central palm nodes
+  const points = [
+    landmarks[HandLandmark.WRIST],
+    landmarks[HandLandmark.INDEX_FINGER_MCP],
+    landmarks[HandLandmark.MIDDLE_FINGER_MCP],
+    landmarks[HandLandmark.RING_FINGER_MCP],
+    landmarks[HandLandmark.PINKY_MCP],
+  ];
+
+  // Shoelace formula for polygon area
+  let area = 0;
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area += points[i].x * points[j].y;
+    area -= points[j].x * points[i].y;
+  }
+  return Math.abs(area) / 2;
+}
+
+/**
  * Detect if palm is facing toward the camera
  * When palm faces camera, the wrist z is larger (further) than fingertip z (closer)
  * Also checks that the hand is relatively flat (not tilted sideways)
@@ -265,13 +293,39 @@ export function isPalmFacingCamera(landmarks: Landmark[]): boolean {
 }
 
 /**
+ * Calculate hand size based on the spread of landmarks
+ * Larger value = hand is closer to the camera
+ * Uses 2D distance from wrist to fingertips (averages all fingers)
+ */
+export function calculateHandSize(landmarks: Landmark[]): number {
+  const wrist = landmarks[HandLandmark.WRIST];
+
+  const fingerTips = [
+    landmarks[HandLandmark.THUMB_TIP],
+    landmarks[HandLandmark.INDEX_FINGER_TIP],
+    landmarks[HandLandmark.MIDDLE_FINGER_TIP],
+    landmarks[HandLandmark.RING_FINGER_TIP],
+    landmarks[HandLandmark.PINKY_TIP],
+  ];
+
+  // Calculate average 2D distance from wrist to all fingertips
+  const totalDistance = fingerTips.reduce((sum, tip) => {
+    return sum + distance2D(wrist, tip);
+  }, 0);
+
+  return totalDistance / fingerTips.length;
+}
+
+/**
  * Analyze complete gesture state for one hand
  */
 export function analyzeGesture(landmarks: Landmark[]): GestureState {
   const pinches = detectAllPinches(landmarks);
   const rotation = calculateHandRotation(landmarks);
   const palmCenter = calculatePalmCenter(landmarks);
+  const palmArea = calculatePalmArea(landmarks);
   const fingerStates = detectFingerStates(landmarks);
+  const handSize = calculateHandSize(landmarks);
 
   const isOpen = Object.values(fingerStates).every(extended => extended);
   const isFist = Object.values(fingerStates).every(extended => !extended);
@@ -281,9 +335,11 @@ export function analyzeGesture(landmarks: Landmark[]): GestureState {
     pinches,
     rotation,
     palmCenter,
+    palmArea,
     isOpen,
     isFist,
     isPalmFacingCamera: palmFacingCamera,
+    handSize,
     fingerStates,
   };
 }

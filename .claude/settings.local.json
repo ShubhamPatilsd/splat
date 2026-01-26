@@ -13,7 +13,9 @@
       "Bash(npm install:*)",
       "Bash(taskkill:*)",
       "Bash(del \"E:\\\\splat\\\\.next\\\\dev\\\\lock\")",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(xargs cat:*)"
     ]
   }
 }
