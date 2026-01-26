@@ -88,6 +88,19 @@ export default function GestureTracker() {
   const prevSplatStateRef = useRef(false);
   const splatCooldownRef = useRef(false);
 
+  // Drawing mode state
+  const [isDrawingMode, setIsDrawingMode] = useState(false);
+  const [currentColor, setCurrentColor] = useState('#FF0000'); // Default red
+  const isDrawingModeRef = useRef(false);
+  const currentColorRef = useRef('#FF0000');
+  const drawingStrokesRef = useRef<Array<{x: number, y: number, color: string}[]>>([]);
+  const currentStrokeRef = useRef<{x: number, y: number, color: string}[]>([]);
+  const isPinchingRef = useRef(false);
+
+  // Sync refs with state
+  isDrawingModeRef.current = isDrawingMode;
+  currentColorRef.current = currentColor;
+
   // Detect gesture combinations
   const detectGestureCombos = useCallback((handData: HandData[]) => {
     const combos: GestureCombo[] = [];
@@ -326,8 +339,120 @@ export default function GestureTracker() {
                 }
               });
 
-              // Draw radial menu for LEFT HAND when palm is open
-              if (!isRightHand && gesture.isOpen) {
+              // DRAWING MODE: Handle drawing with right hand pinch
+              if (isDrawingModeRef.current && isRightHand && gesture.pinches.length > 0) {
+                const pinch = gesture.pinches[0]; // Use first pinch
+                if (pinch.isPinching && pinch.strength > 0.5) {
+                  const screenPos = normalizeToScreen(
+                    pinch.position,
+                    canvas.width,
+                    canvas.height
+                  );
+
+                  if (!isPinchingRef.current) {
+                    // Start new stroke
+                    isPinchingRef.current = true;
+                    currentStrokeRef.current = [{x: screenPos.x, y: screenPos.y, color: currentColorRef.current}];
+                  } else {
+                    // Continue stroke
+                    currentStrokeRef.current.push({x: screenPos.x, y: screenPos.y, color: currentColorRef.current});
+                  }
+
+                  // Draw cursor indicator when actively drawing
+                  ctx.beginPath();
+                  ctx.arc(screenPos.x, screenPos.y, 12, 0, 2 * Math.PI);
+                  ctx.strokeStyle = currentColorRef.current;
+                  ctx.lineWidth = 3;
+                  ctx.stroke();
+                  ctx.beginPath();
+                  ctx.arc(screenPos.x, screenPos.y, 4, 0, 2 * Math.PI);
+                  ctx.fillStyle = currentColorRef.current;
+                  ctx.fill();
+                } else if (isPinchingRef.current) {
+                  // End stroke
+                  isPinchingRef.current = false;
+                  if (currentStrokeRef.current.length > 1) {
+                    drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
+                    currentStrokeRef.current = [];
+                  }
+                }
+              } else if (isPinchingRef.current) {
+                // End stroke if hand lost or mode changed
+                isPinchingRef.current = false;
+                if (currentStrokeRef.current.length > 1) {
+                  drawingStrokesRef.current = [...drawingStrokesRef.current, currentStrokeRef.current];
+                  currentStrokeRef.current = [];
+                }
+              }
+
+              // Draw COLOR PICKER for LEFT HAND when palm is open in DRAWING MODE
+              if (!isRightHand && gesture.isOpen && isDrawingModeRef.current) {
+                const palmPos = normalizeToScreen(
+                  gesture.palmCenter,
+                  canvas.width,
+                  canvas.height
+                );
+
+                const hueRadius = 120;
+                const innerRadius = 40;
+
+                // Draw smooth continuous hue wheel (360 segments = 1 degree each)
+                const segments = 360;
+                for (let i = 0; i < segments; i++) {
+                  const startAngle = (i / segments) * Math.PI * 2 - Math.PI / 2;
+                  const endAngle = ((i + 1) / segments) * Math.PI * 2 - Math.PI / 2;
+                  const hue = (i / segments) * 360;
+
+                  ctx.beginPath();
+                  ctx.arc(palmPos.x, palmPos.y, hueRadius, startAngle, endAngle);
+                  ctx.arc(palmPos.x, palmPos.y, innerRadius, endAngle, startAngle, true);
+                  ctx.closePath();
+                  ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+                  ctx.fill();
+                }
+
+                // Draw center circle showing current color
+                ctx.beginPath();
+                ctx.arc(palmPos.x, palmPos.y, innerRadius, 0, 2 * Math.PI);
+                ctx.fillStyle = currentColor;
+                ctx.fill();
+                ctx.strokeStyle = '#FFFFFF';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+
+                // Check if pinching to select color
+                if (gesture.pinches.length > 0) {
+                  const pinch = gesture.pinches[0];
+                  if (pinch.isPinching && pinch.strength > 0.7) {
+                    const pinchPos = normalizeToScreen(
+                      pinch.position,
+                      canvas.width,
+                      canvas.height
+                    );
+
+                    // Calculate angle from palm center to pinch position
+                    const dx = pinchPos.x - palmPos.x;
+                    const dy = pinchPos.y - palmPos.y;
+                    const angle = Math.atan2(dy, dx) + Math.PI / 2; // Offset by 90deg
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    // Only select if pinching on the hue ring
+                    if (distance >= innerRadius && distance <= hueRadius) {
+                      const hue = ((angle + Math.PI) / (Math.PI * 2)) * 360;
+                      const selectedColor = `hsl(${hue}, 100%, 50%)`;
+                      setCurrentColor(selectedColor);
+
+                      // Visual feedback
+                      ctx.beginPath();
+                      ctx.arc(pinchPos.x, pinchPos.y, 15, 0, 2 * Math.PI);
+                      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                      ctx.fill();
+                    }
+                  }
+                }
+              }
+              // Draw RADIAL MENU for LEFT HAND when palm is open (NOT in drawing mode)
+              else if (!isRightHand && gesture.isOpen && !isDrawingModeRef.current) {
                 const palmPos = normalizeToScreen(
                   gesture.palmCenter,
                   canvas.width,
@@ -445,6 +570,36 @@ export default function GestureTracker() {
             setGestureCombos([]);
           }
 
+          // Draw existing strokes ON TOP of everything (after video and hands)
+          drawingStrokesRef.current.forEach(stroke => {
+            if (stroke.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(stroke[0].x, stroke[0].y);
+            for (let i = 1; i < stroke.length; i++) {
+              ctx.lineTo(stroke[i].x, stroke[i].y);
+            }
+            ctx.strokeStyle = stroke[0].color;
+            ctx.lineWidth = 8;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+          });
+
+          // Draw current stroke being drawn
+          if (currentStrokeRef.current.length > 1) {
+            const stroke = currentStrokeRef.current;
+            ctx.beginPath();
+            ctx.moveTo(stroke[0].x, stroke[0].y);
+            for (let i = 1; i < stroke.length; i++) {
+              ctx.lineTo(stroke[i].x, stroke[i].y);
+            }
+            ctx.strokeStyle = stroke[0].color;
+            ctx.lineWidth = 8;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+          }
+
           ctx.restore();
         });
 
@@ -522,11 +677,42 @@ export default function GestureTracker() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-white">Gesture Tracker</h1>
-            <p className="text-sm text-gray-400">Real-time hand gesture detection and combinations</p>
+            <p className="text-sm text-gray-400">
+              {isDrawingMode ? '🎨 Drawing Mode - Pinch to draw, left hand for color picker' : 'Real-time hand gesture detection and combinations'}
+            </p>
           </div>
-          <div className="text-right">
-            <div className="text-sm text-gray-400">Hands Detected</div>
-            <div className="text-3xl font-bold text-white">{hands.length}</div>
+          <div className="flex items-center gap-4">
+            {/* Drawing Mode Toggle */}
+            <button
+              onClick={() => setIsDrawingMode(!isDrawingMode)}
+              className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+                isDrawingMode
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white'
+                  : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
+            >
+              {isDrawingMode ? '🎨 Drawing Mode' : '👋 Gesture Mode'}
+            </button>
+
+            {/* Clear Canvas Button (only in drawing mode) */}
+            {isDrawingMode && (
+              <button
+                onClick={() => {
+                  drawingStrokesRef.current = [];
+                  currentStrokeRef.current = [];
+                  isPinchingRef.current = false;
+                }}
+                className="px-4 py-2 rounded-lg font-semibold bg-red-600 hover:bg-red-700 text-white transition-colors"
+              >
+                🗑️ Clear Canvas
+              </button>
+            )}
+
+            {/* Hands Detected Counter */}
+            <div className="text-right">
+              <div className="text-sm text-gray-400">Hands Detected</div>
+              <div className="text-3xl font-bold text-white">{hands.length}</div>
+            </div>
           </div>
         </div>
       </div>
@@ -623,18 +809,33 @@ export default function GestureTracker() {
             {/* Gesture Instructions */}
             <div className="mt-3 pt-3 border-t border-gray-700">
               <div className="text-xs text-gray-400 space-y-1">
-                <p className="font-semibold text-yellow-400 mb-2">💥 SPLAT Gesture:</p>
-                <p>• Show <span className="text-white font-semibold">BOTH HANDS</span> with open palms facing the camera</p>
-                <p>• Quick, simultaneous motion - like pushing or saying "stop!"</p>
-                <p>• Look for the <span className="text-yellow-400">PALM FORWARD</span> badge on each hand</p>
+                {isDrawingMode ? (
+                  <>
+                    <p className="font-semibold text-purple-400 mb-2">🎨 Drawing Mode Instructions:</p>
+                    <p>• <span className="text-green-400 font-semibold">RIGHT HAND</span>: Pinch thumb + index finger to draw</p>
+                    <p>• Pinch strength 50%+ starts drawing, release to end stroke</p>
+                    <p>• Circular cursor shows current drawing position</p>
+                    <p>• <span className="text-red-400 font-semibold">LEFT HAND</span>: Open palm shows smooth color picker wheel</p>
+                    <p>• Pinch on the color wheel to select a new color (70%+ strength)</p>
+                    <p>• Current color shown in center circle</p>
+                    <p>• Click <span className="text-red-400 font-semibold">"Clear Canvas"</span> button to erase all strokes</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-semibold text-yellow-400 mb-2">💥 SPLAT Gesture:</p>
+                    <p>• Show <span className="text-white font-semibold">BOTH HANDS</span> with open palms facing the camera</p>
+                    <p>• Quick, simultaneous motion - like pushing or saying "stop!"</p>
+                    <p>• Look for the <span className="text-yellow-400">PALM FORWARD</span> badge on each hand</p>
 
-                <p className="font-semibold text-purple-400 mt-3 mb-2">🎯 Radial Menu Controls:</p>
-                <p>• Show your <span className="text-red-400 font-semibold">LEFT HAND</span> with palm open (all fingers spread)</p>
-                <p>• Radial menu appears on your palm center ({Math.round(MENU_END_ANGLE - MENU_START_ANGLE)}° range, {menuItemsConfig.length} segments)</p>
-                <p>• <span className="text-yellow-400 font-semibold">Rotate your wrist left/right</span> to select tools</p>
-                <p>• Uses <span className="text-green-400 font-semibold">MIDDLE FINGER</span> tracking with {SENSITIVITY}× sensitivity</p>
-                <p>• <span className="text-blue-400">🖊️ Pen</span> → <span className="text-green-400">✏️ Pencil</span> (pointing up) → <span className="text-orange-400">🖌️ Brush</span> → <span className="text-red-400">🧹 Eraser</span></p>
-                <p>• Yellow line and angle value show adjusted rotation</p>
+                    <p className="font-semibold text-purple-400 mt-3 mb-2">🎯 Radial Menu Controls:</p>
+                    <p>• Show your <span className="text-red-400 font-semibold">LEFT HAND</span> with palm open (all fingers spread)</p>
+                    <p>• Radial menu appears on your palm center ({Math.round(MENU_END_ANGLE - MENU_START_ANGLE)}° range, {menuItemsConfig.length} segments)</p>
+                    <p>• <span className="text-yellow-400 font-semibold">Rotate your wrist left/right</span> to select tools</p>
+                    <p>• Uses <span className="text-green-400 font-semibold">MIDDLE FINGER</span> tracking with {SENSITIVITY}× sensitivity</p>
+                    <p>• <span className="text-blue-400">🖊️ Pen</span> → <span className="text-green-400">✏️ Pencil</span> (pointing up) → <span className="text-orange-400">🖌️ Brush</span> → <span className="text-red-400">🧹 Eraser</span></p>
+                    <p>• Yellow line and angle value show adjusted rotation</p>
+                  </>
+                )}
               </div>
             </div>
           </div>
