@@ -952,47 +952,51 @@ export default function HandTracker() {
               }
             }
 
-            // SPLAT GESTURE: Both hands open with palms facing camera
-            let bothHandsOpen = false;
-            let bothPalmsFacingCamera = false;
+            if (interactionModeRef.current === 'physics') {
+              // SPLAT GESTURE: Both hands open with palms facing camera
+              let bothHandsOpen = false;
+              let bothPalmsFacingCamera = false;
 
-            if (results.multiHandLandmarks && results.multiHandedness && results.multiHandLandmarks.length === 2) {
-              const hand1Landmarks = results.multiHandLandmarks[0];
-              const hand2Landmarks = results.multiHandLandmarks[1];
+              if (results.multiHandLandmarks && results.multiHandedness && results.multiHandLandmarks.length === 2) {
+                const hand1Landmarks = results.multiHandLandmarks[0];
+                const hand2Landmarks = results.multiHandLandmarks[1];
 
-              const hand1Open = detectOpenHand(hand1Landmarks);
-              const hand2Open = detectOpenHand(hand2Landmarks);
-              const hand1PalmForward = detectPalmFacingCamera(hand1Landmarks);
-              const hand2PalmForward = detectPalmFacingCamera(hand2Landmarks);
+                const hand1Open = detectOpenHand(hand1Landmarks);
+                const hand2Open = detectOpenHand(hand2Landmarks);
+                const hand1PalmForward = detectPalmFacingCamera(hand1Landmarks);
+                const hand2PalmForward = detectPalmFacingCamera(hand2Landmarks);
 
-              bothHandsOpen = hand1Open && hand2Open;
-              bothPalmsFacingCamera = hand1PalmForward && hand2PalmForward;
+                bothHandsOpen = hand1Open && hand2Open;
+                bothPalmsFacingCamera = hand1PalmForward && hand2PalmForward;
 
-              const isSplatPose = bothHandsOpen && bothPalmsFacingCamera;
+                const isSplatPose = bothHandsOpen && bothPalmsFacingCamera;
 
-              // Detect onset (transition from not-splat to splat) with cooldown
-              if (isSplatPose && !prevSplatStateRef.current && !splatCooldownRef.current) {
-                // Trigger splat!
-                setSplatActive(true);
-                splatCooldownRef.current = true;
+                // Detect onset (transition from not-splat to splat) with cooldown
+                if (isSplatPose && !prevSplatStateRef.current && !splatCooldownRef.current) {
+                  // Trigger splat!
+                  setSplatActive(true);
+                  splatCooldownRef.current = true;
 
-                // Convert floating boxes to 3D
-                convertFloatingBoxesTo3D();
+                  // Convert floating boxes to 3D
+                  convertFloatingBoxesTo3D();
 
-                // Reset splat visual after animation
-                setTimeout(() => {
-                  setSplatActive(false);
-                }, 500);
+                  // Reset splat visual after animation
+                  setTimeout(() => {
+                    setSplatActive(false);
+                  }, 500);
 
-                // Cooldown to prevent rapid re-triggering
-                setTimeout(() => {
-                  splatCooldownRef.current = false;
-                }, 800);
+                  // Cooldown to prevent rapid re-triggering
+                  setTimeout(() => {
+                    splatCooldownRef.current = false;
+                  }, 800);
+                }
+
+                prevSplatStateRef.current = isSplatPose;
+              } else {
+                // Reset splat state when not detecting 2 hands
+                prevSplatStateRef.current = false;
               }
-
-              prevSplatStateRef.current = isSplatPose;
             } else {
-              // Reset splat state when not detecting 2 hands
               prevSplatStateRef.current = false;
             }
           } else {
