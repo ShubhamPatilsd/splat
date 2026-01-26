@@ -37,21 +37,60 @@ const WATER_BLUR_AMOUNT = 12; // Gaussian blur stdDeviation
 const WATER_CONTRAST = 20; // Color matrix alpha multiplier
 const WATER_THRESHOLD = -10; // Color matrix alpha offset
 
-// Fire configuration
-const FIRE_PARTICLE_RADIUS = 10;
-const FIRE_PARTICLE_SPACING = 15;
-const FIRE_COLORS = ['#FF4500', '#FF6347', '#FFA500', '#FFD700', '#FF8C00'];
-const MAX_FIRE_PARTICLES = 500;
-const FIRE_LIFETIME = 3000; // milliseconds before fire particle dies
-const FIRE_UPWARD_FORCE = 0.0003; // upward force per frame
-const BURN_DAMAGE_RATE = 0.02; // health reduction per frame when touching fire
-const BURN_DISTANCE = 30; // distance at which fire can burn objects
+// Fire configuration - Realistic fire rendering with blackbody radiation colors
+const FIRE_PARTICLE_RADIUS = 14;
+const FIRE_PARTICLE_SPACING = 18;
+const MAX_FIRE_PARTICLES = 400;
+const FIRE_LIFETIME = 2500; // milliseconds before fire particle dies
+const FIRE_UPWARD_FORCE = 0.00045; // stronger upward force for more realistic rising
+const BURN_DAMAGE_RATE = 0.025; // health reduction per frame when touching fire
+const BURN_DISTANCE = 35; // distance at which fire can burn objects
+const FIRE_BLUR_AMOUNT = 8; // Gaussian blur for fire glow
+const FIRE_TURBULENCE_FREQ = 0.04; // Turbulence frequency for flame distortion
+const FIRE_TURBULENCE_OCTAVES = 3; // Turbulence complexity
+
+// Blackbody radiation color gradient (temperature-based: hot core -> cool edges)
+// Based on Planck's law approximation for fire temperatures (800K - 1500K)
+const getFireColor = (normalizedAge: number, intensity: number = 1): string => {
+  // normalizedAge: 0 = just born (hottest), 1 = about to die (coolest)
+  const heat = (1 - normalizedAge) * intensity;
+
+  if (heat > 0.9) {
+    // White-yellow core (hottest)
+    return `rgba(255, 255, 220, ${heat})`;
+  } else if (heat > 0.7) {
+    // Bright yellow
+    const r = 255;
+    const g = Math.floor(200 + (heat - 0.7) * 275);
+    const b = Math.floor(100 * (heat - 0.7) / 0.2);
+    return `rgba(${r}, ${g}, ${b}, ${heat})`;
+  } else if (heat > 0.5) {
+    // Orange
+    const r = 255;
+    const g = Math.floor(120 + (heat - 0.5) * 400);
+    const b = 0;
+    return `rgba(${r}, ${g}, ${b}, ${heat})`;
+  } else if (heat > 0.25) {
+    // Red-orange
+    const r = 255;
+    const g = Math.floor((heat - 0.25) * 480);
+    const b = 0;
+    return `rgba(${r}, ${g}, ${b}, ${heat * 1.2})`;
+  } else {
+    // Dark red / smoke transition
+    const r = Math.floor(180 + heat * 300);
+    const g = 0;
+    const b = 0;
+    return `rgba(${r}, ${g}, ${b}, ${heat * 1.5})`;
+  }
+};
 
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const physicsCanvasRef = useRef<HTMLCanvasElement>(null);
   const waterCanvasRef = useRef<HTMLCanvasElement>(null);
+  const fireCanvasRef = useRef<HTMLCanvasElement>(null);
   const threejsCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -76,6 +115,7 @@ export default function HandTracker() {
   const groundRef = useRef<Matter.Body | null>(null);
   const wallsRef = useRef<Matter.Body[]>([]);
   const waterAnimationRef = useRef<number | null>(null);
+  const fireAnimationRef = useRef<number | null>(null);
 
   // Gesture tracking refs
   const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -278,7 +318,7 @@ export default function HandTracker() {
       // Start small for animation
       mesh.scale.set(0.1, 0.1, 0.1);
 
-      threeSceneRef.current.add(mesh);
+      threeSceneRef.current!.add(mesh);
       threeModelsRef.current.push({
         mesh,
         box,
@@ -603,7 +643,7 @@ export default function HandTracker() {
     setParticleCount(waterParticlesRef.current.length);
   };
 
-  // Create fire particles with upward floating behavior
+  // Create fire particles with realistic upward floating behavior
   const createFire = (start: { x: number; y: number }, end: { x: number; y: number }) => {
     if (!engineRef.current) return;
 
@@ -643,20 +683,20 @@ export default function HandTracker() {
         const y = minY + FIRE_PARTICLE_SPACING * row + FIRE_PARTICLE_SPACING / 2;
 
         // Add randomness to initial position
-        const randomX = x + (Math.random() - 0.5) * 6;
-        const randomY = y + (Math.random() - 0.5) * 6;
+        const randomX = x + (Math.random() - 0.5) * 8;
+        const randomY = y + (Math.random() - 0.5) * 8;
 
-        // Random fire color
-        const color = FIRE_COLORS[Math.floor(Math.random() * FIRE_COLORS.length)];
+        // Random intensity variation for each particle
+        const intensity = 0.7 + Math.random() * 0.3;
 
         const particle = Matter.Bodies.circle(randomX, randomY, FIRE_PARTICLE_RADIUS, {
-          restitution: 0.1,
+          restitution: 0.05,
           friction: 0.0,
-          frictionAir: 0.02,
-          density: 0.0005,
+          frictionAir: 0.015, // Less air friction for more floaty fire
+          density: 0.0003, // Lighter particles rise better
           label: 'fire',
           render: {
-            fillStyle: color
+            visible: false // We render fire ourselves with custom shader-like effect
           }
         });
 
@@ -664,8 +704,9 @@ export default function HandTracker() {
         fireParticlesRef.current.push({
           body: particle,
           createdAt: Date.now(),
-          color: color
-        });
+          color: '', // Not used anymore - we compute color based on age
+          intensity: intensity // Store intensity for variation
+        } as any);
       }
     }
   };
@@ -695,6 +736,91 @@ export default function HandTracker() {
 
     // Schedule next frame
     waterAnimationRef.current = requestAnimationFrame(renderWater);
+  }, []);
+
+  // Render fire particles with realistic blackbody radiation colors and glow
+  const renderFire = useCallback(() => {
+    const fireCanvas = fireCanvasRef.current;
+    if (!fireCanvas) return;
+
+    const ctx = fireCanvas.getContext('2d');
+    if (!ctx) return;
+
+    // Clear canvas
+    ctx.clearRect(0, 0, fireCanvas.width, fireCanvas.height);
+
+    const now = Date.now();
+
+    // Sort particles by age (oldest/coolest first, newest/hottest on top)
+    const sortedParticles = [...fireParticlesRef.current].sort((a, b) => {
+      const ageA = now - a.createdAt;
+      const ageB = now - b.createdAt;
+      return ageB - ageA; // Oldest first (will be drawn first, under newer particles)
+    });
+
+    // Draw each fire particle with blackbody color based on age
+    for (const fireParticle of sortedParticles) {
+      const { x, y } = fireParticle.body.position;
+      const age = now - fireParticle.createdAt;
+      const normalizedAge = Math.min(age / FIRE_LIFETIME, 1);
+      const intensity = (fireParticle as any).intensity || 1;
+
+      // Calculate particle size - starts larger, shrinks as it ages
+      const sizeMultiplier = 1.8 - normalizedAge * 0.8;
+      const baseRadius = FIRE_PARTICLE_RADIUS * sizeMultiplier;
+
+      // Add flickering effect using time-based noise
+      const flicker = 0.85 + Math.sin(now * 0.02 + x * 0.1) * 0.15;
+      const radius = baseRadius * flicker;
+
+      // Get blackbody color based on age
+      const color = getFireColor(normalizedAge, intensity);
+
+      // Draw outer glow (larger, more transparent)
+      const glowRadius = radius * 2.5;
+      const glowGradient = ctx.createRadialGradient(x, y, 0, x, y, glowRadius);
+      const glowColor = getFireColor(normalizedAge * 0.7, intensity * 0.4);
+      glowGradient.addColorStop(0, glowColor);
+      glowGradient.addColorStop(0.5, 'rgba(255, 100, 0, 0.1)');
+      glowGradient.addColorStop(1, 'rgba(255, 50, 0, 0)');
+
+      ctx.beginPath();
+      ctx.arc(x, y, glowRadius, 0, Math.PI * 2);
+      ctx.fillStyle = glowGradient;
+      ctx.fill();
+
+      // Draw main fire particle with radial gradient for hot core
+      const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+
+      // Hot core (white/yellow) to outer edge (orange/red)
+      const coreHeat = (1 - normalizedAge) * intensity;
+      if (coreHeat > 0.6) {
+        gradient.addColorStop(0, `rgba(255, 255, 240, ${coreHeat})`);
+        gradient.addColorStop(0.3, `rgba(255, 220, 100, ${coreHeat * 0.9})`);
+      } else {
+        gradient.addColorStop(0, `rgba(255, 200, 50, ${coreHeat + 0.2})`);
+        gradient.addColorStop(0.3, `rgba(255, 150, 0, ${coreHeat + 0.1})`);
+      }
+      gradient.addColorStop(0.6, color);
+      gradient.addColorStop(1, 'rgba(100, 20, 0, 0)');
+
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      // Add bright spark at the very center for young particles
+      if (normalizedAge < 0.3) {
+        const sparkRadius = radius * 0.3 * (1 - normalizedAge / 0.3);
+        ctx.beginPath();
+        ctx.arc(x, y, sparkRadius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${(0.3 - normalizedAge) * 2})`;
+        ctx.fill();
+      }
+    }
+
+    // Schedule next frame
+    fireAnimationRef.current = requestAnimationFrame(renderFire);
   }, []);
 
   // Clear all boxes and particles
@@ -1047,6 +1173,9 @@ export default function HandTracker() {
         // Start water rendering loop
         renderWater();
 
+        // Start fire rendering loop
+        renderFire();
+
         setIsLoading(false);
 
       } catch (err) {
@@ -1069,6 +1198,9 @@ export default function HandTracker() {
       if (waterAnimationRef.current) {
         cancelAnimationFrame(waterAnimationRef.current);
       }
+      if (fireAnimationRef.current) {
+        cancelAnimationFrame(fireAnimationRef.current);
+      }
       if (runnerRef.current && engineRef.current) {
         Matter.Runner.stop(runnerRef.current);
       }
@@ -1090,7 +1222,7 @@ export default function HandTracker() {
         });
       }
     };
-  }, [renderWater]);
+  }, [renderWater, renderFire]);
 
   // Function to load MediaPipe scripts dynamically
   const loadMediaPipeScripts = (): Promise<void> => {
@@ -1147,6 +1279,43 @@ export default function HandTracker() {
               mode="matrix"
               values={`1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 ${WATER_CONTRAST} ${WATER_THRESHOLD}`}
               result="contrast"
+            />
+          </filter>
+          {/* Realistic fire filter with turbulence distortion and glow */}
+          <filter id="fire-filter" x="-50%" y="-50%" width="200%" height="200%">
+            {/* Turbulence for flame distortion effect */}
+            <feTurbulence
+              type="fractalNoise"
+              baseFrequency={FIRE_TURBULENCE_FREQ}
+              numOctaves={FIRE_TURBULENCE_OCTAVES}
+              seed="5"
+              result="turbulence"
+            >
+              <animate
+                attributeName="baseFrequency"
+                values="0.03;0.05;0.03"
+                dur="3s"
+                repeatCount="indefinite"
+              />
+            </feTurbulence>
+            {/* Displacement map for wavy flame effect */}
+            <feDisplacementMap
+              in="SourceGraphic"
+              in2="turbulence"
+              scale="8"
+              xChannelSelector="R"
+              yChannelSelector="G"
+              result="displaced"
+            />
+            {/* Soft blur for glow */}
+            <feGaussianBlur in="displaced" stdDeviation={FIRE_BLUR_AMOUNT} result="blur" />
+            {/* Composite the blurred glow with original */}
+            <feComposite in="SourceGraphic" in2="blur" operator="over" result="composite" />
+            {/* Color enhancement for fire brightness */}
+            <feColorMatrix
+              in="composite"
+              type="matrix"
+              values="1.2 0 0 0 0.1  0 1 0 0 0  0 0 0.8 0 0  0 0 0 1 0"
             />
           </filter>
         </defs>
@@ -1374,6 +1543,22 @@ export default function HandTracker() {
         }}
       />
 
+      {/* Fire canvas with realistic flame filter (above water, below physics) */}
+      <canvas
+        ref={fireCanvasRef}
+        className="absolute max-w-full max-h-full pointer-events-none"
+        width={1280}
+        height={720}
+        style={{
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          filter: 'url(#fire-filter)',
+          mixBlendMode: 'screen', // Additive blending for realistic fire glow
+          zIndex: 1.5
+        }}
+      />
+
       {/* Physics canvas (transparent overlay for solid objects) */}
       <canvas
         ref={physicsCanvasRef}
@@ -1412,7 +1597,7 @@ export default function HandTracker() {
           <li><strong>3D Transform:</strong> Throw a box, while it's floating/airborne do SPLAT gesture to expand it into a 3D spinning cube</li>
           <li><strong>Solid:</strong> Rigid boxes that bounce and collide</li>
           <li><strong>Water:</strong> Liquid particles with metaball blur effect</li>
-          <li><strong>Fire:</strong> Flame particles that float upward and burn boxes (boxes turn dark and disappear)</li>
+          <li><strong>Fire:</strong> Realistic flames with blackbody radiation colors (white-yellow core → orange → red edges), turbulence distortion, and glow. Burns boxes on contact!</li>
           <li>Switch modes and materials using buttons in top-right corner</li>
         </ul>
       </div>

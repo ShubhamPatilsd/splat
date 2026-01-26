@@ -13,7 +13,9 @@
       "Bash(npm install:*)",
       "Bash(taskkill:*)",
       "Bash(del \"E:\\\\splat\\\\.next\\\\dev\\\\lock\")",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "WebFetch(domain:andrewkchan.dev)",
+      "WebFetch(domain:clockworkchilli.com)"
     ]
   }
 }
