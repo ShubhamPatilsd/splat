@@ -394,3 +394,47 @@ export function rotationToSliderValue(
   const normalized = ((angle + 180) % 360) / 360;
   return min + (normalized * (max - min));
 }
+
+/**
+ * Detect "Wakanda Forever" gesture - both arms crossed over chest
+ * In mirrored camera view, left wrist X > right wrist X when arms are crossed
+ * @param leftHandLandmarks - landmarks for the left hand
+ * @param rightHandLandmarks - landmarks for the right hand
+ * @returns boolean indicating if the gesture is detected
+ */
+export function detectWakandaForeverGesture(
+  leftHandLandmarks: Landmark[],
+  rightHandLandmarks: Landmark[]
+): boolean {
+  const leftWrist = leftHandLandmarks[HandLandmark.WRIST];
+  const rightWrist = rightHandLandmarks[HandLandmark.WRIST];
+
+  // Check if wrists are crossed (left wrist X > right wrist X in mirrored view)
+  const wristsCrossed = leftWrist.x > rightWrist.x;
+
+  // Wrists must be close together horizontally (within 25% of frame width)
+  const horizontalDistance = Math.abs(leftWrist.x - rightWrist.x);
+  const wristsCloseHorizontally = horizontalDistance < 0.25;
+
+  // Wrists must be at similar vertical height (within 15% of frame height)
+  const verticalDistance = Math.abs(leftWrist.y - rightWrist.y);
+  const wristsAtSameHeight = verticalDistance < 0.15;
+
+  // Both wrists must be in the chest area
+  // Y: 0.2-0.6 (upper-middle portion of frame)
+  // X: 0.3-0.7 (center portion of frame)
+  const leftWristInChestArea =
+    leftWrist.y > 0.2 && leftWrist.y < 0.6 &&
+    leftWrist.x > 0.3 && leftWrist.x < 0.7;
+  const rightWristInChestArea =
+    rightWrist.y > 0.2 && rightWrist.y < 0.6 &&
+    rightWrist.x > 0.3 && rightWrist.x < 0.7;
+
+  return (
+    wristsCrossed &&
+    wristsCloseHorizontally &&
+    wristsAtSameHeight &&
+    leftWristInChestArea &&
+    rightWristInChestArea
+  );
+}

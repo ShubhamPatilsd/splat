@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Matter from 'matter-js';
 import * as THREE from 'three';
+import { detectWakandaForeverGesture, Landmark } from '../utils/gestureDetection';
 
 // TypeScript declarations for MediaPipe libraries
 declare global {
@@ -92,6 +93,11 @@ export default function HandTracker() {
   // SPLAT gesture refs
   const prevSplatStateRef = useRef(false);
   const splatCooldownRef = useRef(false);
+
+  // Wakanda Forever gesture refs
+  const wakandaForeverCooldownRef = useRef(false);
+  const prevWakandaStateRef = useRef(false);
+  const WAKANDA_COOLDOWN_MS = 1000;
 
   // Three.js refs for 3D models
   const threeSceneRef = useRef<THREE.Scene | null>(null);
@@ -952,48 +958,117 @@ export default function HandTracker() {
               }
             }
 
-            // SPLAT GESTURE: Both hands open with palms facing camera
-            let bothHandsOpen = false;
-            let bothPalmsFacingCamera = false;
+            if (interactionModeRef.current === 'physics') {
+              // SPLAT GESTURE: Both hands open with palms facing camera
+              let bothHandsOpen = false;
+              let bothPalmsFacingCamera = false;
 
-            if (results.multiHandLandmarks && results.multiHandedness && results.multiHandLandmarks.length === 2) {
-              const hand1Landmarks = results.multiHandLandmarks[0];
-              const hand2Landmarks = results.multiHandLandmarks[1];
+              if (results.multiHandLandmarks && results.multiHandedness && results.multiHandLandmarks.length === 2) {
+                const hand1Landmarks = results.multiHandLandmarks[0];
+                const hand2Landmarks = results.multiHandLandmarks[1];
 
-              const hand1Open = detectOpenHand(hand1Landmarks);
-              const hand2Open = detectOpenHand(hand2Landmarks);
-              const hand1PalmForward = detectPalmFacingCamera(hand1Landmarks);
-              const hand2PalmForward = detectPalmFacingCamera(hand2Landmarks);
+                const hand1Open = detectOpenHand(hand1Landmarks);
+                const hand2Open = detectOpenHand(hand2Landmarks);
+                const hand1PalmForward = detectPalmFacingCamera(hand1Landmarks);
+                const hand2PalmForward = detectPalmFacingCamera(hand2Landmarks);
 
-              bothHandsOpen = hand1Open && hand2Open;
-              bothPalmsFacingCamera = hand1PalmForward && hand2PalmForward;
+                bothHandsOpen = hand1Open && hand2Open;
+                bothPalmsFacingCamera = hand1PalmForward && hand2PalmForward;
 
-              const isSplatPose = bothHandsOpen && bothPalmsFacingCamera;
+                const isSplatPose = bothHandsOpen && bothPalmsFacingCamera;
 
-              // Detect onset (transition from not-splat to splat) with cooldown
-              if (isSplatPose && !prevSplatStateRef.current && !splatCooldownRef.current) {
-                // Trigger splat!
-                setSplatActive(true);
-                splatCooldownRef.current = true;
+                // Detect onset (transition from not-splat to splat) with cooldown
+                if (isSplatPose && !prevSplatStateRef.current && !splatCooldownRef.current) {
+                  // Trigger splat!
+                  setSplatActive(true);
+                  splatCooldownRef.current = true;
 
-                // Convert floating boxes to 3D
-                convertFloatingBoxesTo3D();
+                  // Convert floating boxes to 3D
+                  convertFloatingBoxesTo3D();
 
-                // Reset splat visual after animation
-                setTimeout(() => {
-                  setSplatActive(false);
-                }, 500);
+                  // Reset splat visual after animation
+                  setTimeout(() => {
+                    setSplatActive(false);
+                  }, 500);
 
-                // Cooldown to prevent rapid re-triggering
-                setTimeout(() => {
-                  splatCooldownRef.current = false;
-                }, 800);
+                  // Cooldown to prevent rapid re-triggering
+                  setTimeout(() => {
+                    splatCooldownRef.current = false;
+                  }, 800);
+                }
+
+                prevSplatStateRef.current = isSplatPose;
+              } else {
+                // Reset splat state when not detecting 2 hands
+                prevSplatStateRef.current = false;
+              }
+            } else {
+              prevSplatStateRef.current = false;
+            }
+
+            // WAKANDA FOREVER GESTURE: Both arms crossed over chest to toggle mode
+            if (results.multiHandLandmarks.length === 2) {
+              let leftHandLandmarks: Landmark[] | null = null;
+              let rightHandLandmarks: Landmark[] | null = null;
+
+              for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                const handedness = results.multiHandedness[i];
+                if (handedness.label === 'Left') {
+                  leftHandLandmarks = results.multiHandLandmarks[i] as Landmark[];
+                } else {
+                  rightHandLandmarks = results.multiHandLandmarks[i] as Landmark[];
+                }
               }
 
-              prevSplatStateRef.current = isSplatPose;
+              if (leftHandLandmarks && rightHandLandmarks) {
+                const isWakandaPose = detectWakandaForeverGesture(leftHandLandmarks, rightHandLandmarks);
+
+                // Detect onset (transition from not-wakanda to wakanda) with cooldown
+                if (isWakandaPose && !prevWakandaStateRef.current && !wakandaForeverCooldownRef.current) {
+                  // Toggle interaction mode
+                  const newMode: InteractionMode = interactionModeRef.current === 'drawing' ? 'physics' : 'drawing';
+                  setInteractionMode(newMode);
+                  interactionModeRef.current = newMode;
+
+                  // Clean up state from previous mode
+                  if (grabbedBoxRef.current) {
+                    Matter.Body.setStatic(grabbedBoxRef.current, false);
+                    grabbedBoxRef.current = null;
+                    previousGrabPosRef.current = null;
+                    grabVelocityRef.current = { x: 0, y: 0 };
+                    setIsGrabbing(false);
+                  }
+                  pinchStartRef.current = null;
+                  pinchCurrentRef.current = null;
+                  setIsPinching(false);
+
+                  // Set cooldown
+                  wakandaForeverCooldownRef.current = true;
+                  setTimeout(() => {
+                    wakandaForeverCooldownRef.current = false;
+                  }, WAKANDA_COOLDOWN_MS);
+                }
+
+                prevWakandaStateRef.current = isWakandaPose;
+
+                // Draw gold line between wrists when gesture detected
+                if (isWakandaPose) {
+                  const leftWrist = leftHandLandmarks[0];
+                  const rightWrist = rightHandLandmarks[0];
+                  ctx.save();
+                  ctx.strokeStyle = '#FFD700';
+                  ctx.lineWidth = 4;
+                  ctx.shadowColor = '#FFD700';
+                  ctx.shadowBlur = 15;
+                  ctx.beginPath();
+                  ctx.moveTo(leftWrist.x * canvas.width, leftWrist.y * canvas.height);
+                  ctx.lineTo(rightWrist.x * canvas.width, rightWrist.y * canvas.height);
+                  ctx.stroke();
+                  ctx.restore();
+                }
+              }
             } else {
-              // Reset splat state when not detecting 2 hands
-              prevSplatStateRef.current = false;
+              prevWakandaStateRef.current = false;
             }
           } else {
             setHandsDetected(0);
@@ -1212,45 +1287,17 @@ export default function HandTracker() {
 
       {/* Mode and Material selectors */}
       <div className="absolute top-4 right-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg space-y-2">
-        {/* Mode selector */}
+        {/* Mode indicator */}
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">Mode:</span>
-          <button
-            onClick={() => {
-              setInteractionMode('drawing');
-              interactionModeRef.current = 'drawing';
-              // Release any grabbed box when switching modes
-              if (grabbedBoxRef.current) {
-                Matter.Body.setStatic(grabbedBoxRef.current, false);
-                grabbedBoxRef.current = null;
-                setIsGrabbing(false);
-              }
-            }}
-            className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-              interactionMode === 'drawing'
-                ? 'bg-green-600 hover:bg-green-700'
-                : 'bg-gray-600 hover:bg-gray-700'
-            }`}
-          >
-            Drawing
-          </button>
-          <button
-            onClick={() => {
-              setInteractionMode('physics');
-              interactionModeRef.current = 'physics';
-              // Reset drawing state when switching modes
-              pinchStartRef.current = null;
-              pinchCurrentRef.current = null;
-              setIsPinching(false);
-            }}
-            className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-              interactionMode === 'physics'
-                ? 'bg-green-600 hover:bg-green-700'
-                : 'bg-gray-600 hover:bg-gray-700'
-            }`}
-          >
-            Physics
-          </button>
+          <span className={`px-3 py-1 rounded text-sm font-bold ${
+            interactionMode === 'drawing'
+              ? 'bg-green-600 text-white'
+              : 'bg-blue-600 text-white'
+          }`}>
+            {interactionMode === 'drawing' ? 'Drawing' : 'Physics'}
+          </span>
+          <span className="text-xs text-yellow-400">Cross arms to toggle</span>
         </div>
 
         {/* Material selector - only show in drawing mode */}
@@ -1403,13 +1450,14 @@ export default function HandTracker() {
           <li>Green = Right hand, Red = Left hand</li>
           <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : currentMaterial === 'water' ? 'water' : 'fire'}</li>
           <li><strong>Physics Mode:</strong> Pinch near a box to grab it, move to reposition, release pinch to throw</li>
+          <li><strong>Cross Arms:</strong> Cross both arms over your chest to toggle between Drawing and Physics modes</li>
           <li><strong>Antigravity:</strong> Right hand points up ☝️ + Left hand faces down 👇 (both required) to reverse gravity</li>
           <li><strong>SPLAT! 💥:</strong> Both hands open with palms facing camera - explosive effect + converts floating boxes to rotating 3D models!</li>
           <li><strong>3D Transform:</strong> Throw a box, while it's floating/airborne do SPLAT gesture to expand it into a 3D spinning cube</li>
           <li><strong>Solid:</strong> Rigid boxes that bounce and collide</li>
           <li><strong>Water:</strong> Liquid particles with metaball blur effect</li>
           <li><strong>Fire:</strong> Flame particles that float upward and burn boxes (boxes turn dark and disappear)</li>
-          <li>Switch modes and materials using buttons in top-right corner</li>
+          <li>Switch modes by crossing arms, select materials in top-right corner</li>
         </ul>
       </div>
     </div>
