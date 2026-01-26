@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Matter from 'matter-js';
 import * as THREE from 'three';
-import { detectWakandaForeverGesture, Landmark } from '../utils/gestureDetection';
+import { detectKnucklesTogetherGesture, HandLandmark, Landmark } from '../utils/gestureDetection';
 
 // TypeScript declarations for MediaPipe libraries
 declare global {
@@ -29,6 +29,14 @@ type SolidStyle = 'color' | 'wood';
 
 // Interaction modes
 type InteractionMode = 'drawing' | 'physics';
+
+// Pending drawing (visual-only in drawing mode, converted to physics when switching to physics mode)
+type PendingDrawing = {
+  start: { x: number; y: number };
+  end: { x: number; y: number };
+  material: MaterialType;
+  solidStyle: SolidStyle;
+};
 
 // Water configuration - using metaball/liquid rendering approach with Gaussian blur
 const WATER_PARTICLE_RADIUS = 12;
@@ -107,7 +115,7 @@ export default function HandTracker() {
   const [solidStyle, setSolidStyle] = useState<SolidStyle>('color');
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
   const [particleCount, setParticleCount] = useState(0);
-  const [splatActive, setSplatActive] = useState(false);
+  const [pendingDrawingsCount, setPendingDrawingsCount] = useState(0);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [agentPrompt, setAgentPrompt] = useState<string | null>(null);
 
@@ -138,14 +146,13 @@ export default function HandTracker() {
   const previousGrabPosRef = useRef<{ x: number; y: number } | null>(null);
   const grabVelocityRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // SPLAT gesture refs
-  const prevSplatStateRef = useRef(false);
-  const splatCooldownRef = useRef(false);
+  // Pending drawings (drawing mode only; converted to physics when switching to physics)
+  const drawingsRef = useRef<PendingDrawing[]>([]);
 
-  // Wakanda Forever gesture refs
-  const wakandaForeverCooldownRef = useRef(false);
-  const prevWakandaStateRef = useRef(false);
-  const WAKANDA_COOLDOWN_MS = 1000;
+  // Knuckles-together mode switch refs
+  const knucklesCooldownRef = useRef(false);
+  const prevKnucklesTogetherRef = useRef(false);
+  const KNUCKLES_COOLDOWN_MS = 1000;
 
   // Three.js refs for 3D models
   const threeSceneRef = useRef<THREE.Scene | null>(null);
@@ -226,42 +233,6 @@ export default function HandTracker() {
     return (indexDown || middleDown) && tipsBelow;
   };
 
-  // Detect open hand gesture (all fingers extended)
-  const detectOpenHand = (landmarks: any) => {
-    const indexTip = landmarks[8];
-    const indexMcp = landmarks[5];
-    const middleTip = landmarks[12];
-    const middleMcp = landmarks[9];
-    const ringTip = landmarks[16];
-    const ringMcp = landmarks[13];
-    const pinkyTip = landmarks[20];
-    const pinkyMcp = landmarks[17];
-
-    // Check if all fingers are extended (tips higher than bases)
-    const indexExtended = indexTip.y < indexMcp.y - 0.03;
-    const middleExtended = middleTip.y < middleMcp.y - 0.03;
-    const ringExtended = ringTip.y < ringMcp.y - 0.03;
-    const pinkyExtended = pinkyTip.y < pinkyMcp.y - 0.03;
-
-    return indexExtended && middleExtended && ringExtended && pinkyExtended;
-  };
-
-  // Detect palm facing camera (based on landmark z-depth)
-  const detectPalmFacingCamera = (landmarks: any) => {
-    const wrist = landmarks[0];
-    const middleMcp = landmarks[9]; // Middle finger base
-    const middleTip = landmarks[12];
-
-    // When palm faces camera, wrist is pushed back (further from camera)
-    // Wrist should be further from camera than middle finger MCP
-    const wristBehindPalm = wrist.z > middleMcp.z - 0.02;
-
-    // Fingertips should be closer to camera than wrist
-    const tipsForward = middleTip.z < wrist.z + 0.03;
-
-    return wristBehindPalm && tipsForward;
-  };
-
   // Find the closest box to a position
   const findClosestBox = (position: { x: number; y: number }, maxDistance: number = 100) => {
     let closestBox: Matter.Body | null = null;
@@ -279,71 +250,6 @@ export default function HandTracker() {
     });
 
     return closestBox;
-  };
-
-  // Check if a box is floating (not touching ground or walls)
-  const isBoxFloating = (box: Matter.Body) => {
-    if (!engineRef.current || !groundRef.current) return false;
-
-    // Check if box has significant velocity (still moving)
-    const isMoving = Math.abs(box.velocity.x) > 0.5 || Math.abs(box.velocity.y) > 0.5;
-
-    // Check if box is far from ground (y position of bottom edge)
-    const boxBottom = box.position.y + (box.bounds.max.y - box.bounds.min.y) / 2;
-    const groundTop = groundRef.current.position.y - 10;
-    const isAboveGround = boxBottom < groundTop - 20;
-
-    return isMoving && isAboveGround;
-  };
-
-  // Convert floating boxes to 3D models
-  const convertFloatingBoxesTo3D = () => {
-    if (!threeSceneRef.current || !engineRef.current) return;
-
-    const floatingBoxes = boxesRef.current.filter(box => isBoxFloating(box));
-
-    floatingBoxes.forEach(box => {
-      // Check if already converted
-      const alreadyConverted = threeModelsRef.current.some(model => model.box === box);
-      if (alreadyConverted) return;
-
-      const width = box.bounds.max.x - box.bounds.min.x;
-      const height = box.bounds.max.y - box.bounds.min.y;
-      const depth = Math.min(width, height); // Use smaller dimension for depth
-
-      // Create 3D box geometry
-      const geometry = new THREE.BoxGeometry(width, height, depth);
-      const material = new THREE.MeshPhongMaterial({
-        color: box.render.fillStyle as string,
-        shininess: 100,
-        specular: 0x444444,
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-
-      // Position at box location (convert from 2D to 3D space)
-      mesh.position.set(
-        box.position.x - 640, // Center at 0
-        360 - box.position.y, // Flip Y axis
-        0
-      );
-
-      mesh.rotation.z = box.angle;
-
-      // Start small for animation
-      mesh.scale.set(0.1, 0.1, 0.1);
-
-      threeSceneRef.current!.add(mesh);
-      threeModelsRef.current.push({
-        mesh,
-        box,
-        scale: 0.1,
-        targetScale: 1.0,
-        color: box.render.fillStyle as string,
-      });
-
-      // Hide the 2D box by making it invisible in the physics renderer
-      box.render.visible = false;
-    });
   };
 
   // Initialize Three.js for 3D models
@@ -545,8 +451,12 @@ export default function HandTracker() {
     }
   };
 
-  // Create a solid physics box
-  const createSolidBox = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+  // Create a solid physics box (optional solidStyle override for converting pending drawings)
+  const createSolidBox = (
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    solidStyleOverride?: SolidStyle
+  ) => {
     if (!engineRef.current) return;
 
     const width = Math.abs(end.x - start.x);
@@ -560,7 +470,7 @@ export default function HandTracker() {
 
     // Random color
     const color = BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)];
-    const useWoodTexture = solidStyleRef.current === 'wood';
+    const useWoodTexture = (solidStyleOverride ?? solidStyleRef.current) === 'wood';
 
     // Create Matter.js body
     const box = Matter.Bodies.rectangle(centerX, centerY, width, height, {
@@ -968,8 +878,9 @@ export default function HandTracker() {
     }
   }, [applyAgentBodies, isAnalyzing]);
 
-  // Clear all boxes and particles
+  // Clear all boxes, particles, and pending drawings
   const clearAllBoxes = () => {
+    drawingsRef.current = [];
     if (!engineRef.current) return;
 
     boxesRef.current.forEach(box => {
@@ -1043,6 +954,27 @@ export default function HandTracker() {
           // Draw the video frame
           ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
 
+          // Draw pending drawings (drawing mode only — not yet physics)
+          drawingsRef.current.forEach(d => {
+            const minX = Math.min(d.start.x, d.end.x);
+            const minY = Math.min(d.start.y, d.end.y);
+            const w = Math.abs(d.end.x - d.start.x);
+            const h = Math.abs(d.end.y - d.start.y);
+            ctx.save();
+            if (d.material === 'water') {
+              ctx.fillStyle = 'rgba(77, 157, 224, 0.5)';
+            } else if (d.material === 'fire') {
+              ctx.fillStyle = 'rgba(255, 99, 71, 0.5)';
+            } else {
+              ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            }
+            ctx.strokeStyle = d.material === 'water' ? '#4D9DE0' : d.material === 'fire' ? '#FF6347' : '#FFFFFF';
+            ctx.lineWidth = 2;
+            ctx.fillRect(minX, minY, w, h);
+            ctx.strokeRect(minX, minY, w, h);
+            ctx.restore();
+          });
+
           // Draw hand landmarks if detected
           if (results.multiHandLandmarks && results.multiHandedness) {
             setHandsDetected(results.multiHandLandmarks.length);
@@ -1103,9 +1035,20 @@ export default function HandTracker() {
                       ctx.setLineDash([]);
                     }
                   } else {
-                    // Release pinch
+                    // Release pinch — in drawing mode store as pending drawing (converted to physics when switching mode)
                     if (pinchStartRef.current && pinchCurrentRef.current) {
-                      createBox(pinchStartRef.current, pinchCurrentRef.current);
+                      const start = pinchStartRef.current;
+                      const end = pinchCurrentRef.current;
+                      const w = Math.abs(end.x - start.x);
+                      const h = Math.abs(end.y - start.y);
+                      if (w >= 20 && h >= 20) {
+                        drawingsRef.current.push({
+                          start: { ...start },
+                          end: { ...end },
+                          material: currentMaterialRef.current,
+                          solidStyle: solidStyleRef.current
+                        });
+                      }
                     }
                     pinchStartRef.current = null;
                     pinchCurrentRef.current = null;
@@ -1224,55 +1167,7 @@ export default function HandTracker() {
               }
             }
 
-            if (interactionModeRef.current === 'physics') {
-              // SPLAT GESTURE: Both hands open with palms facing camera
-              let bothHandsOpen = false;
-              let bothPalmsFacingCamera = false;
-
-              if (results.multiHandLandmarks && results.multiHandedness && results.multiHandLandmarks.length === 2) {
-                const hand1Landmarks = results.multiHandLandmarks[0];
-                const hand2Landmarks = results.multiHandLandmarks[1];
-
-                const hand1Open = detectOpenHand(hand1Landmarks);
-                const hand2Open = detectOpenHand(hand2Landmarks);
-                const hand1PalmForward = detectPalmFacingCamera(hand1Landmarks);
-                const hand2PalmForward = detectPalmFacingCamera(hand2Landmarks);
-
-                bothHandsOpen = hand1Open && hand2Open;
-                bothPalmsFacingCamera = hand1PalmForward && hand2PalmForward;
-
-                const isSplatPose = bothHandsOpen && bothPalmsFacingCamera;
-
-                // Detect onset (transition from not-splat to splat) with cooldown
-                if (isSplatPose && !prevSplatStateRef.current && !splatCooldownRef.current) {
-                  // Trigger splat!
-                  setSplatActive(true);
-                  splatCooldownRef.current = true;
-
-                  // Convert floating boxes to 3D
-                  convertFloatingBoxesTo3D();
-
-                  // Reset splat visual after animation
-                  setTimeout(() => {
-                    setSplatActive(false);
-                  }, 500);
-
-                  // Cooldown to prevent rapid re-triggering
-                  setTimeout(() => {
-                    splatCooldownRef.current = false;
-                  }, 800);
-                }
-
-                prevSplatStateRef.current = isSplatPose;
-              } else {
-                // Reset splat state when not detecting 2 hands
-                prevSplatStateRef.current = false;
-              }
-            } else {
-              prevSplatStateRef.current = false;
-            }
-
-            // WAKANDA FOREVER GESTURE: Both arms crossed over chest to toggle mode
+            // Knuckles together: toggle drawing/physics mode when both hands' knuckles are pressed together
             if (results.multiHandLandmarks.length === 2) {
               let leftHandLandmarks: Landmark[] | null = null;
               let rightHandLandmarks: Landmark[] | null = null;
@@ -1287,14 +1182,30 @@ export default function HandTracker() {
               }
 
               if (leftHandLandmarks && rightHandLandmarks) {
-                const isWakandaPose = detectWakandaForeverGesture(leftHandLandmarks, rightHandLandmarks);
+                const isKnucklesTogether = detectKnucklesTogetherGesture(leftHandLandmarks, rightHandLandmarks);
 
-                // Detect onset (transition from not-wakanda to wakanda) with cooldown
-                if (isWakandaPose && !prevWakandaStateRef.current && !wakandaForeverCooldownRef.current) {
+                // Detect onset (knuckles just came together) with cooldown → toggle drawing/physics
+                if (isKnucklesTogether && !prevKnucklesTogetherRef.current && !knucklesCooldownRef.current) {
                   // Toggle interaction mode
                   const newMode: InteractionMode = interactionModeRef.current === 'drawing' ? 'physics' : 'drawing';
                   setInteractionMode(newMode);
                   interactionModeRef.current = newMode;
+
+                  // When switching to physics: convert any pending drawings into physics objects
+                  if (newMode === 'physics' && drawingsRef.current.length > 0) {
+                    const toConvert = [...drawingsRef.current];
+                    drawingsRef.current = [];
+                    setPendingDrawingsCount(0);
+                    toConvert.forEach(d => {
+                      if (d.material === 'water') {
+                        createWater(d.start, d.end);
+                      } else if (d.material === 'fire') {
+                        createFire(d.start, d.end);
+                      } else {
+                        createSolidBox(d.start, d.end, d.solidStyle);
+                      }
+                    });
+                  }
 
                   // Clean up state from previous mode
                   if (grabbedBoxRef.current) {
@@ -1309,32 +1220,35 @@ export default function HandTracker() {
                   setIsPinching(false);
 
                   // Set cooldown
-                  wakandaForeverCooldownRef.current = true;
+                  knucklesCooldownRef.current = true;
                   setTimeout(() => {
-                    wakandaForeverCooldownRef.current = false;
-                  }, WAKANDA_COOLDOWN_MS);
+                    knucklesCooldownRef.current = false;
+                  }, KNUCKLES_COOLDOWN_MS);
                 }
 
-                prevWakandaStateRef.current = isWakandaPose;
+                prevKnucklesTogetherRef.current = isKnucklesTogether;
 
-                // Draw gold line between wrists when gesture detected
-                if (isWakandaPose) {
-                  const leftWrist = leftHandLandmarks[0];
-                  const rightWrist = rightHandLandmarks[0];
+                // Draw cyan line between knuckle centers when knuckles-together detected
+                if (isKnucklesTogether) {
+                  const knuckleIndices = [HandLandmark.INDEX_FINGER_MCP, HandLandmark.MIDDLE_FINGER_MCP, HandLandmark.RING_FINGER_MCP, HandLandmark.PINKY_MCP];
+                  const leftCx = knuckleIndices.reduce((s, i) => s + leftHandLandmarks[i].x, 0) / 4;
+                  const leftCy = knuckleIndices.reduce((s, i) => s + leftHandLandmarks[i].y, 0) / 4;
+                  const rightCx = knuckleIndices.reduce((s, i) => s + rightHandLandmarks[i].x, 0) / 4;
+                  const rightCy = knuckleIndices.reduce((s, i) => s + rightHandLandmarks[i].y, 0) / 4;
                   ctx.save();
-                  ctx.strokeStyle = '#FFD700';
+                  ctx.strokeStyle = '#22D3EE';
                   ctx.lineWidth = 4;
-                  ctx.shadowColor = '#FFD700';
-                  ctx.shadowBlur = 15;
+                  ctx.shadowColor = '#22D3EE';
+                  ctx.shadowBlur = 12;
                   ctx.beginPath();
-                  ctx.moveTo(leftWrist.x * canvas.width, leftWrist.y * canvas.height);
-                  ctx.lineTo(rightWrist.x * canvas.width, rightWrist.y * canvas.height);
+                  ctx.moveTo(leftCx * canvas.width, leftCy * canvas.height);
+                  ctx.lineTo(rightCx * canvas.width, rightCy * canvas.height);
                   ctx.stroke();
                   ctx.restore();
                 }
               }
             } else {
-              prevWakandaStateRef.current = false;
+              prevKnucklesTogetherRef.current = false;
             }
           } else {
             setHandsDetected(0);
@@ -1538,140 +1452,60 @@ export default function HandTracker() {
         </defs>
       </svg>
 
-      {/* SPLAT Visual Feedback */}
-      {splatActive && (
-        <>
-          <div className="absolute inset-0 z-50 pointer-events-none flex items-center justify-center animate-splat-flash">
-            <div className="text-center">
-              <div className="text-9xl font-black text-white drop-shadow-[0_0_60px_rgba(255,255,0,1)] animate-splat-scale">
-                SPLAT!
-              </div>
-              <div className="text-6xl mt-4">💥✋✋💥</div>
-            </div>
-            <div className="absolute inset-0 bg-gradient-radial from-yellow-400/40 via-orange-500/20 to-transparent animate-splat-ring" />
-          </div>
-          <style jsx>{`
-            @keyframes splat-flash {
-              0% { background-color: rgba(255, 255, 0, 0.3); }
-              100% { background-color: transparent; }
-            }
-            @keyframes splat-scale {
-              0% { transform: scale(0.5); opacity: 0; }
-              50% { transform: scale(1.2); opacity: 1; }
-              100% { transform: scale(1); opacity: 0; }
-            }
-            @keyframes splat-ring {
-              0% { transform: scale(0.5); opacity: 0.8; }
-              100% { transform: scale(2); opacity: 0; }
-            }
-            .animate-splat-flash {
-              animation: splat-flash 0.5s ease-out forwards;
-            }
-            .animate-splat-scale {
-              animation: splat-scale 0.5s ease-out forwards;
-            }
-            .animate-splat-ring {
-              animation: splat-ring 0.5s ease-out forwards;
-            }
-          `}</style>
-        </>
-      )}
-
-      {/* Status bar */}
-      <div className="absolute top-4 left-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg">
-        {isLoading ? (
-          <span>Loading hand tracking...</span>
-        ) : error ? (
-          <span className="text-red-400">{error}</span>
-        ) : (
-          <div className="flex items-center gap-4">
-            <span>
-              {handsDetected === 0 ? 'No hands detected' : `${handsDetected} hand${handsDetected > 1 ? 's' : ''} detected`}
+      {/* Control panel — glass card */}
+      <div className="absolute top-4 right-4 z-10 w-56 rounded-2xl border border-white/10 bg-zinc-900/80 backdrop-blur-xl shadow-xl text-zinc-100 overflow-hidden">
+        <div className="px-4 py-3 border-b border-white/5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Mode</span>
+            <span className={`shrink-0 px-2.5 py-0.5 rounded-full text-xs font-medium ${
+              interactionMode === 'drawing'
+                ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30'
+                : 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30'
+            }`}>
+              {interactionMode === 'drawing' ? 'Drawing' : 'Physics'}
             </span>
-            {isPinching && <span>Drawing</span>}
-            {isGrabbing && <span>Grabbing</span>}
-            {isAntigravity && <span className="text-purple-400 font-bold">Antigravity</span>}
-            {splatActive && <span className="text-yellow-400 font-bold animate-pulse">SPLAT! 💥</span>}
-            <span>Boxes: {boxesRef.current.length}/{MAX_BOXES}</span>
-            {threeModelsRef.current.length > 0 && <span className="text-cyan-400">3D Models: {threeModelsRef.current.length}</span>}
-            <span>Water: {particleCount}/{MAX_WATER_PARTICLES}</span>
-            <span className="text-orange-400">Fire: {fireParticlesRef.current.length}/{MAX_FIRE_PARTICLES}</span>
           </div>
-        )}
-      </div>
-
-      {/* Mode and Material selectors */}
-      <div className="absolute top-4 right-4 z-10 bg-black/70 text-white px-4 py-2 rounded-lg space-y-2">
-        {/* Mode indicator */}
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold">Mode:</span>
-          <span className={`px-3 py-1 rounded text-sm font-bold ${
-            interactionMode === 'drawing'
-              ? 'bg-green-600 text-white'
-              : 'bg-blue-600 text-white'
-          }`}>
-            {interactionMode === 'drawing' ? 'Drawing' : 'Physics'}
-          </span>
-          <span className="text-xs text-yellow-400">Cross arms to toggle</span>
+          <p className="mt-1 text-[10px] text-zinc-500">Cross arms to toggle</p>
         </div>
 
-        {/* Material selector - only show in drawing mode */}
         {interactionMode === 'drawing' && (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold">Material:</span>
-              <button
-                onClick={() => {
-                  setCurrentMaterial('solid');
-                  currentMaterialRef.current = 'solid';
-                }}
-                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                  currentMaterial === 'solid'
-                    ? 'bg-blue-600 hover:bg-blue-700'
-                    : 'bg-gray-600 hover:bg-gray-700'
-                }`}
-              >
-                Solid
-              </button>
-              <button
-                onClick={() => {
-                  setCurrentMaterial('water');
-                  currentMaterialRef.current = 'water';
-                }}
-                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                  currentMaterial === 'water'
-                    ? 'bg-blue-600 hover:bg-blue-700'
-                    : 'bg-gray-600 hover:bg-gray-700'
-                }`}
-              >
-                Water
-              </button>
-              <button
-                onClick={() => {
-                  setCurrentMaterial('fire');
-                  currentMaterialRef.current = 'fire';
-                }}
-                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                  currentMaterial === 'fire'
-                    ? 'bg-orange-600 hover:bg-orange-700'
-                    : 'bg-gray-600 hover:bg-gray-700'
-                }`}
-              >
-                Fire
-              </button>
+          <div className="px-4 py-3 border-b border-white/5 space-y-3">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">Material</span>
+            <div className="flex flex-wrap gap-1.5">
+              {[
+                { id: 'solid' as const, label: 'Solid' },
+                { id: 'water' as const, label: 'Water' },
+                { id: 'fire' as const, label: 'Fire' },
+              ].map(({ id, label }) => (
+                <button
+                  key={id}
+                  onClick={() => {
+                    setCurrentMaterial(id);
+                    currentMaterialRef.current = id;
+                  }}
+                  className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                    currentMaterial === id
+                      ? id === 'fire'
+                        ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30'
+                        : 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30'
+                      : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
             {currentMaterial === 'solid' && (
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold">Solid:</span>
+              <div className="flex flex-wrap gap-1.5 pt-1">
                 <button
                   onClick={() => {
                     setSolidStyle('color');
                     solidStyleRef.current = 'color';
                   }}
-                  className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                  className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
                     solidStyle === 'color'
-                      ? 'bg-emerald-600 hover:bg-emerald-700'
-                      : 'bg-gray-600 hover:bg-gray-700'
+                      ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30'
+                      : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
                   }`}
                 >
                   Color
@@ -1681,10 +1515,10 @@ export default function HandTracker() {
                     setSolidStyle('wood');
                     solidStyleRef.current = 'wood';
                   }}
-                  className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                  className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
                     solidStyle === 'wood'
-                      ? 'bg-amber-600 hover:bg-amber-700'
-                      : 'bg-gray-600 hover:bg-gray-700'
+                      ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30'
+                      : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-300'
                   }`}
                 >
                   Wood
@@ -1694,23 +1528,28 @@ export default function HandTracker() {
           </div>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="px-4 py-3 flex flex-col gap-2">
           <button
             onClick={handleAnalyzeFrame}
             disabled={isAnalyzing}
-            className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-              isAnalyzing ? 'bg-gray-600' : 'bg-purple-600 hover:bg-purple-700'
-            }`}
+            className="w-full py-2 rounded-xl text-xs font-medium transition-colors bg-violet-500/20 text-violet-300 ring-1 ring-violet-500/30 hover:bg-violet-500/30 disabled:opacity-50 disabled:pointer-events-none"
           >
-            {isAnalyzing ? 'Analyzing…' : 'Analyze Frame'}
+            {isAnalyzing ? 'Analyzing…' : 'Analyze frame'}
+          </button>
+          <button
+            onClick={clearAllBoxes}
+            className="w-full py-2 rounded-xl text-xs font-medium transition-colors bg-red-500/10 text-red-400/90 ring-1 ring-red-500/20 hover:bg-red-500/20"
+          >
+            Clear all ({boxesRef.current.length + particleCount + fireParticlesRef.current.length + (interactionMode === 'drawing' ? pendingDrawingsCount : 0)})
           </button>
         </div>
       </div>
 
-      {/* Loading spinner */}
+      {/* Loading overlay */}
       {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-20">
-          <div className="w-16 h-16 border-4 border-white/20 border-t-white rounded-full animate-spin" />
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-zinc-950/80 backdrop-blur-sm">
+          <div className="h-10 w-10 rounded-full border-2 border-zinc-600 border-t-zinc-200 animate-spin" />
+          <span className="text-sm text-zinc-400">Starting camera…</span>
         </div>
       )}
 
@@ -1787,36 +1626,6 @@ export default function HandTracker() {
         style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 3 }}
       />
 
-      {/* Info panel */}
-      <div className="absolute bottom-4 right-4 max-w-sm bg-black/70 text-white p-4 rounded-lg text-sm">
-        <div className="flex justify-between items-start mb-2">
-          <p className="font-semibold">Hand Tracking Info:</p>
-          <button
-            onClick={clearAllBoxes}
-            className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs font-semibold transition-colors"
-          >
-            Clear All ({boxesRef.current.length + particleCount + fireParticlesRef.current.length})
-          </button>
-        </div>
-        {agentPrompt && (
-          <div className="mb-2 text-xs text-purple-200">
-            Agent: {agentPrompt}
-          </div>
-        )}
-        <ul className="list-disc list-inside space-y-1 text-xs">
-          <li>Green = Right hand, Red = Left hand</li>
-          <li><strong>Drawing Mode:</strong> Pinch thumb and index together, drag to define area, release to create {currentMaterial === 'solid' ? 'solid boxes' : currentMaterial === 'water' ? 'water' : 'fire'}</li>
-          <li><strong>Physics Mode:</strong> Pinch near a box to grab it, move to reposition, release pinch to throw</li>
-          <li><strong>Cross Arms:</strong> Cross both arms over your chest to toggle between Drawing and Physics modes</li>
-          <li><strong>Antigravity:</strong> Right hand points up ☝️ + Left hand faces down 👇 (both required) to reverse gravity</li>
-          <li><strong>SPLAT! 💥:</strong> Both hands open with palms facing camera - explosive effect + converts floating boxes to rotating 3D models!</li>
-          <li><strong>3D Transform:</strong> Throw a box, while it's floating/airborne do SPLAT gesture to expand it into a 3D spinning cube</li>
-          <li><strong>Solid:</strong> Rigid boxes that bounce and collide</li>
-          <li><strong>Water:</strong> Liquid particles with metaball blur effect</li>
-          <li><strong>Fire:</strong> Realistic flames with blackbody radiation colors (white-yellow core → orange → red edges), turbulence distortion, and glow. Burns boxes on contact!</li>
-          <li>Switch modes and materials using buttons in top-right corner</li>
-        </ul>
-        </div>
-      </div>
+    </div>
   );
 }

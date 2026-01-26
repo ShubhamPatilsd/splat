@@ -396,45 +396,42 @@ export function rotationToSliderValue(
 }
 
 /**
- * Detect "Wakanda Forever" gesture - both arms crossed over chest
- * In mirrored camera view, left wrist X > right wrist X when arms are crossed
- * @param leftHandLandmarks - landmarks for the left hand
- * @param rightHandLandmarks - landmarks for the right hand
- * @returns boolean indicating if the gesture is detected
+ * Knuckle MCP indices (index, middle, ring, pinky - where fingers meet the palm)
  */
-export function detectWakandaForeverGesture(
+const KNUCKLE_MCPS = [
+  HandLandmark.INDEX_FINGER_MCP,
+  HandLandmark.MIDDLE_FINGER_MCP,
+  HandLandmark.RING_FINGER_MCP,
+  HandLandmark.PINKY_MCP,
+];
+
+/**
+ * Detect "knuckles pressed together" - both hands' knuckles (MCP joints) are close in 3D.
+ * Used to toggle drawing vs physics mode.
+ */
+export function detectKnucklesTogetherGesture(
   leftHandLandmarks: Landmark[],
   rightHandLandmarks: Landmark[]
 ): boolean {
-  const leftWrist = leftHandLandmarks[HandLandmark.WRIST];
-  const rightWrist = rightHandLandmarks[HandLandmark.WRIST];
+  const leftKnuckles = KNUCKLE_MCPS.map((i) => leftHandLandmarks[i]);
+  const rightKnuckles = KNUCKLE_MCPS.map((i) => rightHandLandmarks[i]);
 
-  // Check if wrists are crossed (left wrist X > right wrist X in mirrored view)
-  const wristsCrossed = leftWrist.x > rightWrist.x;
+  const leftCx =
+    leftKnuckles.reduce((s, p) => s + p.x, 0) / leftKnuckles.length;
+  const leftCy =
+    leftKnuckles.reduce((s, p) => s + p.y, 0) / leftKnuckles.length;
+  const leftCz =
+    leftKnuckles.reduce((s, p) => s + p.z, 0) / leftKnuckles.length;
+  const rightCx =
+    rightKnuckles.reduce((s, p) => s + p.x, 0) / rightKnuckles.length;
+  const rightCy =
+    rightKnuckles.reduce((s, p) => s + p.y, 0) / rightKnuckles.length;
+  const rightCz =
+    rightKnuckles.reduce((s, p) => s + p.z, 0) / rightKnuckles.length;
 
-  // Wrists must be close together horizontally (within 25% of frame width)
-  const horizontalDistance = Math.abs(leftWrist.x - rightWrist.x);
-  const wristsCloseHorizontally = horizontalDistance < 0.25;
+  const leftCenter: Landmark = { x: leftCx, y: leftCy, z: leftCz };
+  const rightCenter: Landmark = { x: rightCx, y: rightCy, z: rightCz };
+  const d = distance(leftCenter, rightCenter);
 
-  // Wrists must be at similar vertical height (within 15% of frame height)
-  const verticalDistance = Math.abs(leftWrist.y - rightWrist.y);
-  const wristsAtSameHeight = verticalDistance < 0.15;
-
-  // Both wrists must be in the chest area
-  // Y: 0.2-0.6 (upper-middle portion of frame)
-  // X: 0.3-0.7 (center portion of frame)
-  const leftWristInChestArea =
-    leftWrist.y > 0.2 && leftWrist.y < 0.6 &&
-    leftWrist.x > 0.3 && leftWrist.x < 0.7;
-  const rightWristInChestArea =
-    rightWrist.y > 0.2 && rightWrist.y < 0.6 &&
-    rightWrist.x > 0.3 && rightWrist.x < 0.7;
-
-  return (
-    wristsCrossed &&
-    wristsCloseHorizontally &&
-    wristsAtSameHeight &&
-    leftWristInChestArea &&
-    rightWristInChestArea
-  );
+  return d < 0.12;
 }
