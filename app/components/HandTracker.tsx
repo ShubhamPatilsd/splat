@@ -3,7 +3,13 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Matter from 'matter-js';
 import * as THREE from 'three';
-import { detectKnucklesTogetherGesture, HandLandmark, Landmark, normalizeToScreen } from '../utils/gestureDetection';
+import {
+  analyzeGesture,
+  detectKnucklesTogetherGesture,
+  HandLandmark,
+  Landmark,
+  normalizeToScreen,
+} from '../utils/gestureDetection';
 
 // TypeScript declarations for MediaPipe libraries
 declare global {
@@ -33,6 +39,11 @@ type InteractionMode = 'drawing' | 'physics';
 // Drawing style in drawing mode: box (drag rectangle) or freehand (stroke path)
 type DrawingStyle = 'box' | 'freehand';
 
+// Freehand is pencil-only on the main page; left hand selects only color.
+type FreehandBrush = 'Pencil';
+const PENCIL_STROKE_WIDTH = 2;
+const MIN_PALM_AREA = 0.002;
+
 // Pending drawing (visual-only in drawing mode, converted to physics when switching to physics mode)
 type PendingDrawing =
   | {
@@ -45,6 +56,8 @@ type PendingDrawing =
     points: { x: number; y: number }[];
     material: MaterialType;
     solidStyle: SolidStyle;
+    strokeColor?: string;
+    brushType?: FreehandBrush;
   };
 
 // Build SVG path d from points for freehand strokes
@@ -130,6 +143,8 @@ export default function HandTracker() {
   const [solidStyle, setSolidStyle] = useState<SolidStyle>('color');
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('drawing');
   const [drawingStyle, setDrawingStyle] = useState<DrawingStyle>('box');
+  const [freehandBrush, setFreehandBrush] = useState<FreehandBrush>('Pencil');
+  const [freehandColor, setFreehandColor] = useState('#FF0000');
   const [particleCount, setParticleCount] = useState(0);
   const [pendingDrawings, setPendingDrawings] = useState<PendingDrawing[]>([]);
   const setPendingDrawingsRef = useRef<(d: PendingDrawing[]) => void>(() => { });
@@ -158,14 +173,12 @@ export default function HandTracker() {
   const solidStyleRef = useRef<SolidStyle>('color');
   const interactionModeRef = useRef<InteractionMode>('drawing');
   const drawingStyleRef = useRef<DrawingStyle>('box');
+  const freehandBrushRef = useRef<FreehandBrush>('Pencil');
+  const freehandColorRef = useRef('#FF0000');
+  const prevLeftHandPinchRef = useRef(false);
 
   // Freehand path accumulated while pinching (drawing mode, freehand style)
   const freehandPathRef = useRef<{ x: number; y: number }[]>([]);
-
-  // Hysteresis for left-hand rotation → box vs freehand: switch to box when |angle| < 45°, freehand when |angle| > 55°
-  const leftHandRotationFreehandRef = useRef(false);
-  const ROTATION_BOX_MAX_DEG = 45;
-  const ROTATION_FREEHAND_MIN_DEG = 55;
 
   // Throwing/grabbing refs
   const grabbedBoxRef = useRef<Matter.Body | null>(null);
@@ -513,11 +526,12 @@ export default function HandTracker() {
     }
   };
 
-  // Create a solid physics box (optional solidStyle override for converting pending drawings)
+  // Create a solid physics box (optional solidStyle and color override for converting pending drawings)
   const createSolidBox = (
     start: { x: number; y: number },
     end: { x: number; y: number },
-    solidStyleOverride?: SolidStyle
+    solidStyleOverride?: SolidStyle,
+    colorOverride?: string
   ) => {
     if (!engineRef.current) return;
 
@@ -530,8 +544,7 @@ export default function HandTracker() {
     const centerX = (start.x + end.x) / 2;
     const centerY = (start.y + end.y) / 2;
 
-    // Random color
-    const color = BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)];
+    const color = colorOverride ?? BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)];
     const useWoodTexture = (solidStyleOverride ?? solidStyleRef.current) === 'wood';
 
     // Create Matter.js body
@@ -989,6 +1002,11 @@ export default function HandTracker() {
   }, [drawingStyle]);
 
   useEffect(() => {
+    freehandBrushRef.current = freehandBrush;
+    freehandColorRef.current = freehandColor;
+  }, [freehandBrush, freehandColor]);
+
+  useEffect(() => {
     setPendingDrawingsRef.current = setPendingDrawings;
   });
 
@@ -1106,8 +1124,13 @@ export default function HandTracker() {
 
                     // Draw preview
                     if (pinchStartRef.current && pinchCurrentRef.current) {
-                      ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : currentMaterialRef.current === 'fire' ? '#FF6347' : '#FFFFFF';
-                      ctx.lineWidth = 2;
+                      if (isFreehand) {
+                        ctx.strokeStyle = freehandColorRef.current;
+                        ctx.lineWidth = PENCIL_STROKE_WIDTH;
+                      } else {
+                        ctx.strokeStyle = currentMaterialRef.current === 'water' ? '#4D9DE0' : currentMaterialRef.current === 'fire' ? '#FF6347' : '#FFFFFF';
+                        ctx.lineWidth = 2;
+                      }
                       if (isFreehand && freehandPathRef.current.length >= 2) {
                         ctx.setLineDash([4, 4]);
                         ctx.beginPath();
@@ -1137,7 +1160,9 @@ export default function HandTracker() {
                         drawingsRef.current.push({
                           points: freehandPathRef.current.map(p => ({ ...p })),
                           material: currentMaterialRef.current,
-                          solidStyle: solidStyleRef.current
+                          solidStyle: solidStyleRef.current,
+                          strokeColor: freehandColorRef.current,
+                          brushType: 'Pencil',
                         });
                         setPendingDrawingsRef.current([...drawingsRef.current]);
                       } else if (!isFreehand) {
@@ -1213,23 +1238,68 @@ export default function HandTracker() {
                 }
               }
 
-              // Left hand in drawing mode: rotation drives box vs freehand. Vertical (fingers up) = box, tilted (horizontal) = freehand.
+              // Left hand in drawing mode: palm facing screen = freeform, palm not facing = box.
               if (!isRightHand && interactionModeRef.current === 'drawing') {
-                const angleDeg = getLeftHandRotationDeg(landmarks);
-                const absAngle = Math.abs(angleDeg);
-                let nextFreehand = leftHandRotationFreehandRef.current;
-                if (absAngle < ROTATION_BOX_MAX_DEG) {
-                  nextFreehand = false;
-                } else if (absAngle > ROTATION_FREEHAND_MIN_DEG) {
-                  nextFreehand = true;
-                }
+                const gesture = analyzeGesture(landmarks as Landmark[]);
+                const palmFacing = gesture.isPalmFacingCamera;
+                const nextFreehand = palmFacing;
                 if (nextFreehand !== (drawingStyleRef.current === 'freehand')) {
                   const next: DrawingStyle = nextFreehand ? 'freehand' : 'box';
                   drawingStyleRef.current = next;
                   setDrawingStyle(next);
                 }
-                leftHandRotationFreehandRef.current = nextFreehand;
-                // Draw a small label near the left hand so user sees current mode
+
+                // In freeform, left hand shows only color wheel (pencil is fixed; no brush menu).
+                if (drawingStyleRef.current === 'freehand' && gesture.palmArea > MIN_PALM_AREA) {
+                  const palmPos = normalizeToScreen(gesture.palmCenter, canvas.width, canvas.height);
+                  const hue = ((gesture.rotation.roll + 180) % 360);
+                  const currentHueColor = `hsl(${hue}, 100%, 50%)`;
+
+                  // Color wheel (hue ring)
+                  const wheelRadius = 80;
+                  const innerRadius = 28;
+                  const segments = 60;
+                  for (let i = 0; i < segments; i++) {
+                    const startAngle = (i / segments) * Math.PI * 2;
+                    const endAngle = ((i + 1) / segments) * Math.PI * 2;
+                    const segmentHue = (i / segments) * 360;
+                    ctx.beginPath();
+                    ctx.arc(palmPos.x, palmPos.y, wheelRadius, startAngle, endAngle);
+                    ctx.arc(palmPos.x, palmPos.y, wheelRadius - 12, endAngle, startAngle, true);
+                    ctx.fillStyle = `hsl(${segmentHue}, 100%, 50%)`;
+                    ctx.fill();
+                  }
+
+                  // Center: current color indicator
+                  ctx.beginPath();
+                  ctx.arc(palmPos.x, palmPos.y, innerRadius - 2, 0, 2 * Math.PI);
+                  ctx.fillStyle = freehandColorRef.current;
+                  ctx.fill();
+                  ctx.strokeStyle = '#FFFFFF';
+                  ctx.lineWidth = 2;
+                  ctx.stroke();
+
+                  // Left hand pinch: set color from hue (color selection only)
+                  const leftPinch = gesture.pinches.find(
+                    (p: { fingers: string[] }) => p.fingers.includes('thumb') && p.fingers.includes('index')
+                  );
+                  if (leftPinch && leftPinch.strength > 0.5) {
+                    if (!prevLeftHandPinchRef.current) {
+                      setFreehandColor(currentHueColor);
+                      freehandColorRef.current = currentHueColor;
+                      prevLeftHandPinchRef.current = true;
+                      ctx.beginPath();
+                      ctx.arc(palmPos.x, palmPos.y, wheelRadius + 12, 0, 2 * Math.PI);
+                      ctx.strokeStyle = '#00FF00';
+                      ctx.lineWidth = 5;
+                      ctx.stroke();
+                    }
+                  } else {
+                    prevLeftHandPinchRef.current = false;
+                  }
+                }
+
+                // Mode label
                 const cx = landmarks[9].x * canvas.width;
                 const cy = landmarks[9].y * canvas.height;
                 ctx.save();
@@ -1362,13 +1432,19 @@ export default function HandTracker() {
                           const cy = (minY + maxY) / 2;
                           createFire({ x: cx - w / 2, y: cy - h / 2 }, { x: cx + w / 2, y: cy + h / 2 });
                         } else {
-                          // createSolidBox requires width/height >= 20; use 20x20 per point (was 16x16 and rejected)
+                          // createSolidBox requires width/height >= 20; use 20x20 per point; retain freeform color when present
                           const pts = d.points;
                           const step = Math.max(1, Math.floor(pts.length / 15));
                           const half = 10;
+                          const strokeColor = 'strokeColor' in d ? d.strokeColor : undefined;
                           for (let i = 0; i < pts.length; i += step) {
                             const p = pts[i];
-                            createSolidBox({ x: p.x - half, y: p.y - half }, { x: p.x + half, y: p.y + half }, d.solidStyle);
+                            createSolidBox(
+                              { x: p.x - half, y: p.y - half },
+                              { x: p.x + half, y: p.y + half },
+                              d.solidStyle,
+                              strokeColor
+                            );
                           }
                         }
                       } else {
@@ -1815,16 +1891,19 @@ export default function HandTracker() {
             const stroke = isWater ? '#4D9DE0' : isFire ? '#FF6347' : '#FFFFFF';
             if ('points' in d && d.points.length >= 2) {
               const dPath = pointsToSvgPathD(d.points);
+              const useFreehandStyle = d.strokeColor != null && d.brushType != null;
+              const strokeColor = useFreehandStyle ? (d.strokeColor ?? '#FFFFFF') : stroke;
+              const strokeWidth = useFreehandStyle ? PENCIL_STROKE_WIDTH : (isWater ? 10 : isFire ? 10 : 8);
               return (
                 <path
                   key={i}
                   d={dPath}
                   fill="none"
-                  stroke={stroke}
-                  strokeWidth={isWater ? 10 : isFire ? 10 : 8}
+                  stroke={strokeColor}
+                  strokeWidth={strokeWidth}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  opacity={isWater ? 0.85 : isFire ? 0.9 : 0.9}
+                  opacity={useFreehandStyle ? 1 : (isWater ? 0.85 : isFire ? 0.9 : 0.9)}
                   style={{ filter: 'url(#freehand-stroke-shadow)' }}
                 />
               );
