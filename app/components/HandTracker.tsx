@@ -89,6 +89,12 @@ const BURN_GLOW_LIFETIME = 900; // milliseconds for burn glow to linger
 const BURN_GLOW_BLUR = 14;
 const BURN_GLOW_COLOR = 'rgba(255, 120, 40, 0.6)';
 
+// Surface flames configuration - flames that appear on burning boxes
+const SURFACE_FLAME_LIFETIME = 800; // how long each surface flame lasts
+const SURFACE_FLAME_SPAWN_RATE = 150; // minimum ms between spawning flames at same spot
+const SURFACE_FLAME_RADIUS = 12; // base radius of surface flames
+const MAX_SURFACE_FLAMES_PER_BOX = 8; // max flames per box to prevent overdraw
+
 // Steam configuration - generated when fire meets water
 const STEAM_PARTICLE_RADIUS = 10;
 const MAX_STEAM_PARTICLES = 200;
@@ -187,6 +193,17 @@ export default function HandTracker() {
   const burnGlowAnimationRef = useRef<number | null>(null);
   const steamAnimationRef = useRef<number | null>(null);
   const burnGlowRef = useRef<Map<Matter.Body, { timestamp: number; level: number }>>(new Map());
+  // Surface flames - flames that appear on burning box surfaces
+  const surfaceFlamesRef = useRef<Array<{
+    box: Matter.Body;
+    x: number;
+    y: number;
+    createdAt: number;
+    intensity: number;
+    offsetX: number; // offset from box center for tracking position as box moves
+    offsetY: number;
+  }>>([]);
+  const lastFlameSpawnRef = useRef<Map<Matter.Body, number>>(new Map()); // track last spawn time per box
 
   // Gesture tracking refs
   const pinchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -578,25 +595,75 @@ export default function HandTracker() {
             const newHealth = currentHealth - BURN_DAMAGE_RATE;
             boxHealthRef.current.set(box, newHealth);
 
-            // Visual indication of burning (darken the box)
+            // Visual indication of burning (darken the box by charring it)
             const burnLevel = 1 - newHealth;
-            if (box.render.fillStyle) {
-              // Darken color based on burn level
-              box.render.opacity = Math.max(0.3, 1 - burnLevel);
-            }
+            // Store burn level on the box for rendering charred appearance
+            (box as any).burnLevel = burnLevel;
             burnGlowRef.current.set(box, {
               timestamp: Date.now(),
               level: Math.min(1, burnLevel + 0.2)
             });
+
+            // Spawn surface flames at contact point (rate limited)
+            const lastSpawn = lastFlameSpawnRef.current.get(box) || 0;
+            const flamesOnBox = surfaceFlamesRef.current.filter(f => f.box === box).length;
+
+            if (now - lastSpawn > SURFACE_FLAME_SPAWN_RATE && flamesOnBox < MAX_SURFACE_FLAMES_PER_BOX) {
+              // Calculate contact point on box surface (where fire touches)
+              const firePos = fireParticle.body.position;
+              const boxWidth = box.bounds.max.x - box.bounds.min.x;
+              const boxHeight = box.bounds.max.y - box.bounds.min.y;
+
+              // Clamp flame position to box bounds with some randomness
+              const clampedX = Math.max(box.bounds.min.x + 5, Math.min(box.bounds.max.x - 5,
+                firePos.x + (Math.random() - 0.5) * 20));
+              const clampedY = Math.max(box.bounds.min.y + 5, Math.min(box.bounds.max.y - 5,
+                firePos.y + (Math.random() - 0.5) * 20));
+
+              // Store offset from box center so flame moves with box
+              const offsetX = clampedX - box.position.x;
+              const offsetY = clampedY - box.position.y;
+
+              surfaceFlamesRef.current.push({
+                box: box,
+                x: clampedX,
+                y: clampedY,
+                createdAt: now,
+                intensity: 0.7 + Math.random() * 0.3,
+                offsetX: offsetX,
+                offsetY: offsetY
+              });
+
+              lastFlameSpawnRef.current.set(box, now);
+            }
 
             // Remove box if health reaches 0
             if (newHealth <= 0) {
               Matter.World.remove(engine.world, box);
               boxHealthRef.current.delete(box);
               boxesRef.current = boxesRef.current.filter(b => b !== box);
+              // Clean up surface flames for this box
+              surfaceFlamesRef.current = surfaceFlamesRef.current.filter(f => f.box !== box);
+              lastFlameSpawnRef.current.delete(box);
             }
           }
         });
+      });
+
+      // Update and remove expired surface flames
+      surfaceFlamesRef.current = surfaceFlamesRef.current.filter(flame => {
+        // Remove if box no longer exists
+        if (!boxesRef.current.includes(flame.box)) {
+          return false;
+        }
+        // Remove if expired
+        if (now - flame.createdAt > SURFACE_FLAME_LIFETIME) {
+          return false;
+        }
+        // Update position to follow box movement
+        flame.x = flame.box.position.x + flame.offsetX;
+        flame.y = flame.box.position.y + flame.offsetY;
+        return true;
       });
 
       // Fire-water interaction: generate steam when fire meets water
@@ -990,6 +1057,66 @@ export default function HandTracker() {
       }
     }
 
+    // Render surface flames on burning boxes
+    for (const flame of surfaceFlamesRef.current) {
+      const age = now - flame.createdAt;
+      const normalizedAge = age / SURFACE_FLAME_LIFETIME;
+
+      // Flame flickers and varies in size
+      const flicker = 0.75 + Math.sin(now * 0.03 + flame.x * 0.2) * 0.25;
+      const sizeMultiplier = (1.4 - normalizedAge * 0.5) * flicker;
+      const radius = SURFACE_FLAME_RADIUS * sizeMultiplier;
+
+      // Flame fades as it ages
+      const alpha = (1 - normalizedAge * 0.8) * flame.intensity;
+      const heat = (1 - normalizedAge) * flame.intensity;
+
+      const x = flame.x;
+      const y = flame.y;
+
+      // Draw outer glow halo
+      const glowRadius = radius * 2.2;
+      const glowGradient = ctx.createRadialGradient(x, y, 0, x, y, glowRadius);
+      glowGradient.addColorStop(0, `rgba(255, 120, 30, ${alpha * 0.5})`);
+      glowGradient.addColorStop(0.6, `rgba(255, 60, 0, ${alpha * 0.2})`);
+      glowGradient.addColorStop(1, 'rgba(200, 30, 0, 0)');
+
+      ctx.beginPath();
+      ctx.arc(x, y, glowRadius, 0, Math.PI * 2);
+      ctx.fillStyle = glowGradient;
+      ctx.fill();
+
+      // Draw main flame with hot core
+      const flameGradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      if (heat > 0.5) {
+        flameGradient.addColorStop(0, `rgba(255, 255, 220, ${alpha})`);
+        flameGradient.addColorStop(0.25, `rgba(255, 230, 120, ${alpha * 0.95})`);
+        flameGradient.addColorStop(0.5, `rgba(255, 160, 50, ${alpha * 0.8})`);
+        flameGradient.addColorStop(0.8, `rgba(255, 80, 0, ${alpha * 0.5})`);
+        flameGradient.addColorStop(1, 'rgba(200, 40, 0, 0)');
+      } else {
+        flameGradient.addColorStop(0, `rgba(255, 180, 80, ${alpha})`);
+        flameGradient.addColorStop(0.4, `rgba(255, 100, 30, ${alpha * 0.8})`);
+        flameGradient.addColorStop(0.7, `rgba(220, 50, 0, ${alpha * 0.4})`);
+        flameGradient.addColorStop(1, 'rgba(150, 20, 0, 0)');
+      }
+
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = flameGradient;
+      ctx.fill();
+
+      // Bright center spark for fresh flames
+      if (normalizedAge < 0.35) {
+        const sparkAlpha = (0.35 - normalizedAge) * 2.5 * flame.intensity;
+        const sparkRadius = radius * 0.3;
+        ctx.beginPath();
+        ctx.arc(x, y, sparkRadius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${sparkAlpha})`;
+        ctx.fill();
+      }
+    }
+
     // Schedule next frame
     fireAnimationRef.current = requestAnimationFrame(renderFire);
   }, []);
@@ -1091,6 +1218,37 @@ export default function HandTracker() {
       ctx.ellipse(x, y, width * 0.7, height * 0.7, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+    }
+
+    // Draw char/burn marks on burning boxes
+    for (const box of boxesRef.current) {
+      const burnLevel = (box as any).burnLevel || 0;
+      if (burnLevel > 0.05) {
+        const width = box.bounds.max.x - box.bounds.min.x;
+        const height = box.bounds.max.y - box.bounds.min.y;
+        const x = box.position.x;
+        const y = box.position.y;
+
+        // Draw darkening overlay to simulate charring
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(box.angle);
+
+        // Black char overlay that increases with burn level
+        const charAlpha = Math.min(0.85, burnLevel * 0.9);
+        ctx.fillStyle = `rgba(30, 20, 15, ${charAlpha})`;
+        ctx.fillRect(-width / 2, -height / 2, width, height);
+
+        // Add ember glow around edges for actively burning boxes
+        if (burnLevel < 0.9) {
+          const emberAlpha = (1 - burnLevel) * 0.4;
+          ctx.strokeStyle = `rgba(255, 100, 30, ${emberAlpha})`;
+          ctx.lineWidth = 3;
+          ctx.strokeRect(-width / 2, -height / 2, width, height);
+        }
+
+        ctx.restore();
+      }
     }
 
     burnGlowAnimationRef.current = requestAnimationFrame(renderBurnGlow);
