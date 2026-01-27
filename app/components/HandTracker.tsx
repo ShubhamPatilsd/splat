@@ -89,6 +89,26 @@ const BURN_GLOW_LIFETIME = 900; // milliseconds for burn glow to linger
 const BURN_GLOW_BLUR = 14;
 const BURN_GLOW_COLOR = 'rgba(255, 120, 40, 0.6)';
 
+// Steam configuration - generated when fire meets water
+const STEAM_PARTICLE_RADIUS = 10;
+const MAX_STEAM_PARTICLES = 200;
+const STEAM_LIFETIME = 4000; // longer than fire - steam lingers
+const STEAM_RISE_FORCE = 0.0003; // gentler rise than fire
+const STEAM_TURBULENCE_STRENGTH = 0.0006; // more lateral drift than fire
+const FIRE_WATER_INTERACTION_DIST = 30; // distance for fire-water collision
+
+// Gas physics - turbulence settings for fire and steam
+const GAS_TURBULENCE_SCALE = 0.008; // spatial frequency of turbulence
+const GAS_TIME_SCALE = 0.003; // how fast turbulence evolves
+const FIRE_BASE_RISE = 0.0006; // base upward force for fire
+const FIRE_TURBULENCE_STRENGTH = 0.0004; // fire lateral movement strength
+
+// Simple 2D noise function for gas turbulence (deterministic pseudo-noise)
+const noise2D = (x: number, y: number): number => {
+  const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return (n - Math.floor(n)) * 2 - 1; // Returns -1 to 1
+};
+
 // Blackbody radiation color gradient (temperature-based: hot core -> cool edges)
 // Based on Planck's law approximation for fire temperatures (800K - 1500K)
 const getFireColor = (normalizedAge: number, intensity: number = 1): string => {
@@ -157,13 +177,15 @@ export default function HandTracker() {
   const runnerRef = useRef<Matter.Runner | null>(null);
   const boxesRef = useRef<Matter.Body[]>([]);
   const waterParticlesRef = useRef<Matter.Body[]>([]);
-  const fireParticlesRef = useRef<Array<{ body: Matter.Body; createdAt: number; color: string }>>([]);
+  const fireParticlesRef = useRef<Array<{ body: Matter.Body; createdAt: number; color: string; temperature: number }>>([]);
+  const steamParticlesRef = useRef<Array<{ body: Matter.Body; createdAt: number }>>([]);
   const boxHealthRef = useRef<Map<Matter.Body, number>>(new Map()); // Track health of boxes
   const groundRef = useRef<Matter.Body | null>(null);
   const wallsRef = useRef<Matter.Body[]>([]);
   const waterAnimationRef = useRef<number | null>(null);
   const fireAnimationRef = useRef<number | null>(null);
   const burnGlowAnimationRef = useRef<number | null>(null);
+  const steamAnimationRef = useRef<number | null>(null);
   const burnGlowRef = useRef<Map<Matter.Body, { timestamp: number; level: number }>>(new Map());
 
   // Gesture tracking refs
@@ -457,7 +479,7 @@ export default function HandTracker() {
     Matter.Events.on(engine, 'beforeUpdate', () => {
       const now = Date.now();
 
-      // Apply upward force to fire particles and remove expired ones
+      // Apply turbulent gas physics to fire particles and remove expired ones
       fireParticlesRef.current = fireParticlesRef.current.filter(fireParticle => {
         const age = now - fireParticle.createdAt;
 
@@ -467,17 +489,78 @@ export default function HandTracker() {
           return false;
         }
 
-        // Apply upward force (fire rises)
-        const upwardForce = FIRE_UPWARD_FORCE * (1 - age / FIRE_LIFETIME); // Weaker as it ages
-        Matter.Body.applyForce(fireParticle.body, fireParticle.body.position, { x: 0, y: -upwardForce });
+        const normalizedAge = age / FIRE_LIFETIME;
+        const pos = fireParticle.body.position;
 
-        // Add random horizontal drift for flame effect
-        const drift = (Math.random() - 0.5) * 0.00005;
-        Matter.Body.applyForce(fireParticle.body, fireParticle.body.position, { x: drift, y: 0 });
+        // Update temperature (cools as it ages)
+        fireParticle.temperature = Math.max(0, 1 - normalizedAge * 1.2);
+
+        // Sample noise field at particle position + time for evolving turbulence
+        const noiseX = noise2D(
+          pos.x * GAS_TURBULENCE_SCALE + now * GAS_TIME_SCALE,
+          pos.y * GAS_TURBULENCE_SCALE
+        );
+        const noiseY = noise2D(
+          pos.x * GAS_TURBULENCE_SCALE,
+          pos.y * GAS_TURBULENCE_SCALE + now * GAS_TIME_SCALE * 0.7
+        );
+
+        // Turbulence is stronger for younger, hotter particles
+        const turbulenceMultiplier = 1 - normalizedAge * 0.7;
+        const driftX = noiseX * FIRE_TURBULENCE_STRENGTH * turbulenceMultiplier;
+        const driftY = noiseY * FIRE_TURBULENCE_STRENGTH * 0.3; // Less vertical turbulence
+
+        // Rising force - exponential decay feels more natural than linear
+        // Hotter particles rise faster
+        const riseForce = FIRE_BASE_RISE * Math.exp(-normalizedAge * 2) * (0.3 + fireParticle.temperature * 0.7);
+
+        Matter.Body.applyForce(fireParticle.body, pos, {
+          x: driftX,
+          y: -riseForce + driftY
+        });
 
         // Fade out as it ages
-        const opacity = 1 - (age / FIRE_LIFETIME);
+        const opacity = 1 - normalizedAge;
         fireParticle.body.render.opacity = opacity;
+
+        return true;
+      });
+
+      // Apply turbulent gas physics to steam particles and remove expired ones
+      steamParticlesRef.current = steamParticlesRef.current.filter(steamParticle => {
+        const age = now - steamParticle.createdAt;
+
+        // Remove if too old
+        if (age > STEAM_LIFETIME) {
+          Matter.World.remove(engine.world, steamParticle.body);
+          return false;
+        }
+
+        const normalizedAge = age / STEAM_LIFETIME;
+        const pos = steamParticle.body.position;
+
+        // Steam has gentler, more dispersive movement with more lateral drift
+        const noiseX = noise2D(
+          pos.x * GAS_TURBULENCE_SCALE * 0.6 + now * GAS_TIME_SCALE * 0.7,
+          pos.y * GAS_TURBULENCE_SCALE * 0.6
+        );
+        const noiseY = noise2D(
+          pos.x * GAS_TURBULENCE_SCALE * 0.6,
+          pos.y * GAS_TURBULENCE_SCALE * 0.6 + now * GAS_TIME_SCALE * 0.5
+        );
+
+        // Steam spreads out more as it rises (increases with age)
+        const spreadFactor = 1 + normalizedAge * 2;
+        const driftX = noiseX * STEAM_TURBULENCE_STRENGTH * spreadFactor;
+        const driftY = noiseY * STEAM_TURBULENCE_STRENGTH * 0.2;
+
+        // Gentler, sustained rise (steam floats longer than fire)
+        const riseForce = STEAM_RISE_FORCE * (1 - normalizedAge * 0.5);
+
+        Matter.Body.applyForce(steamParticle.body, pos, {
+          x: driftX,
+          y: -riseForce + driftY
+        });
 
         return true;
       });
@@ -514,6 +597,75 @@ export default function HandTracker() {
             }
           }
         });
+      });
+
+      // Fire-water interaction: generate steam when fire meets water
+      const fireToRemove: number[] = [];
+      const waterToRemove: number[] = [];
+
+      fireParticlesRef.current.forEach((fire, fireIndex) => {
+        if (fireToRemove.includes(fireIndex)) return;
+
+        waterParticlesRef.current.forEach((water, waterIndex) => {
+          if (waterToRemove.includes(waterIndex)) return;
+
+          const dx = fire.body.position.x - water.position.x;
+          const dy = fire.body.position.y - water.position.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+
+          if (dist < FIRE_WATER_INTERACTION_DIST) {
+            // Create steam at midpoint
+            const steamX = (fire.body.position.x + water.position.x) / 2;
+            const steamY = (fire.body.position.y + water.position.y) / 2;
+
+            // Only create steam if we haven't exceeded max
+            if (steamParticlesRef.current.length < MAX_STEAM_PARTICLES) {
+              const steamBody = Matter.Bodies.circle(steamX, steamY, STEAM_PARTICLE_RADIUS, {
+                restitution: 0.1,
+                friction: 0,
+                frictionAir: 0.025, // Higher than fire - steam slows down more
+                density: 0.0002, // Lighter than fire
+                label: 'steam',
+                collisionFilter: { group: -2 }, // Don't collide with each other
+                render: { visible: false }
+              });
+
+              // Give initial upward velocity with some spread
+              Matter.Body.setVelocity(steamBody, {
+                x: (Math.random() - 0.5) * 2,
+                y: -(1 + Math.random() * 1.5)
+              });
+
+              Matter.World.add(engine.world, steamBody);
+              steamParticlesRef.current.push({
+                body: steamBody,
+                createdAt: now
+              });
+            }
+
+            // Mark both particles for removal
+            fireToRemove.push(fireIndex);
+            waterToRemove.push(waterIndex);
+          }
+        });
+      });
+
+      // Remove fire particles that hit water (in reverse order to preserve indices)
+      fireToRemove.sort((a, b) => b - a).forEach(index => {
+        const particle = fireParticlesRef.current[index];
+        if (particle) {
+          Matter.World.remove(engine.world, particle.body);
+          fireParticlesRef.current.splice(index, 1);
+        }
+      });
+
+      // Remove water particles that hit fire (in reverse order to preserve indices)
+      waterToRemove.sort((a, b) => b - a).forEach(index => {
+        const particle = waterParticlesRef.current[index];
+        if (particle) {
+          Matter.World.remove(engine.world, particle);
+          waterParticlesRef.current.splice(index, 1);
+        }
       });
     });
 
@@ -723,6 +875,7 @@ export default function HandTracker() {
           body: particle,
           createdAt: Date.now(),
           color: '', // Not used anymore - we compute color based on age
+          temperature: 1.0, // Start at max temperature
           intensity: intensity // Store intensity for variation
         } as any);
       }
@@ -839,6 +992,59 @@ export default function HandTracker() {
 
     // Schedule next frame
     fireAnimationRef.current = requestAnimationFrame(renderFire);
+  }, []);
+
+  // Render steam particles with wispy, translucent appearance
+  const renderSteam = useCallback(() => {
+    const fireCanvas = fireCanvasRef.current; // Reuse fire canvas for steam (drawn on top)
+    if (!fireCanvas) {
+      steamAnimationRef.current = requestAnimationFrame(renderSteam);
+      return;
+    }
+
+    const ctx = fireCanvas.getContext('2d');
+    if (!ctx) {
+      steamAnimationRef.current = requestAnimationFrame(renderSteam);
+      return;
+    }
+
+    // Don't clear - steam is drawn on top of fire in same canvas
+    // The fire render loop clears, and steam draws after
+
+    const now = Date.now();
+
+    // Draw steam particles with wispy, fading appearance
+    for (const steamParticle of steamParticlesRef.current) {
+      const { x, y } = steamParticle.body.position;
+      const age = now - steamParticle.createdAt;
+      const normalizedAge = Math.min(age / STEAM_LIFETIME, 1);
+
+      // Steam expands as it rises
+      const sizeMultiplier = 1.2 + normalizedAge * 1.5;
+      const radius = STEAM_PARTICLE_RADIUS * sizeMultiplier;
+
+      // Fade out as it ages (starts semi-transparent)
+      const baseOpacity = 0.6 * (1 - normalizedAge);
+
+      // Add subtle pulsing effect
+      const pulse = 0.9 + Math.sin(now * 0.005 + x * 0.05) * 0.1;
+      const opacity = baseOpacity * pulse;
+
+      // Draw steam with soft gradient (white/gray wispy appearance)
+      const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      gradient.addColorStop(0, `rgba(255, 255, 255, ${opacity * 0.8})`);
+      gradient.addColorStop(0.4, `rgba(240, 245, 250, ${opacity * 0.6})`);
+      gradient.addColorStop(0.7, `rgba(220, 230, 240, ${opacity * 0.3})`);
+      gradient.addColorStop(1, `rgba(200, 215, 230, 0)`);
+
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = gradient;
+      ctx.fill();
+    }
+
+    // Schedule next frame
+    steamAnimationRef.current = requestAnimationFrame(renderSteam);
   }, []);
 
   // Render burn glow on boxes affected by fire (soft blur, no particles)
@@ -1721,6 +1927,9 @@ export default function HandTracker() {
         // Start fire rendering loop
         renderFire();
 
+        // Start steam rendering loop
+        renderSteam();
+
         // Start burn glow rendering loop
         renderBurnGlow();
 
@@ -1749,6 +1958,9 @@ export default function HandTracker() {
       if (fireAnimationRef.current) {
         cancelAnimationFrame(fireAnimationRef.current);
       }
+      if (steamAnimationRef.current) {
+        cancelAnimationFrame(steamAnimationRef.current);
+      }
       if (burnGlowAnimationRef.current) {
         cancelAnimationFrame(burnGlowAnimationRef.current);
       }
@@ -1773,7 +1985,7 @@ export default function HandTracker() {
         });
       }
     };
-  }, [renderWater, renderFire, renderBurnGlow]);
+  }, [renderWater, renderFire, renderSteam, renderBurnGlow]);
 
   // Function to load MediaPipe scripts dynamically
   const loadMediaPipeScripts = (): Promise<void> => {

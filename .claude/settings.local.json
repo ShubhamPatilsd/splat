@@ -15,7 +15,9 @@
       "Bash(del \"E:\\\\splat\\\\.next\\\\dev\\\\lock\")",
       "Bash(git add:*)",
       "WebFetch(domain:andrewkchan.dev)",
-      "WebFetch(domain:clockworkchilli.com)"
+      "WebFetch(domain:clockworkchilli.com)",
+      "Bash(npx tsc:*)",
+      "Bash(timeout 15 npm run dev:*)"
     ]
   }
 }
