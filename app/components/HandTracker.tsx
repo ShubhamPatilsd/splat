@@ -1701,12 +1701,11 @@ export default function HandTracker() {
                 prevLeftHandPhysicsPosRef.current = null;
               }
 
-              // Left hand in drawing mode: color wheel when freehand (style is toggled via panel).
+              // Left hand in drawing mode: color wheel for freehand color selection.
               if (!isRightHand && interactionModeRef.current === 'drawing') {
                 const gesture = analyzeGesture(landmarks as Landmark[]);
 
-                // In freeform, left hand shows only color wheel (pencil is fixed; no brush menu).
-                if (drawingStyleRef.current === 'freehand' && gesture.palmArea > MIN_PALM_AREA) {
+                if (gesture.palmArea > MIN_PALM_AREA) {
                   const palmPos = normalizeToScreen(gesture.palmCenter, canvas.width, canvas.height);
                   // Hue from middle-finger direction: roll is palm-center → middle-finger-tip, matches wheel (0° = right = red)
                   const hue = ((gesture.rotation.roll + 360) % 360);
@@ -1727,7 +1726,16 @@ export default function HandTracker() {
                     ctx.fill();
                   }
 
-                  // Center: current color indicator
+                  // Outer ring: current hue preview
+                  ctx.beginPath();
+                  ctx.arc(palmPos.x, palmPos.y, innerRadius + 18, 0, 2 * Math.PI);
+                  ctx.fillStyle = currentHueColor;
+                  ctx.fill();
+                  ctx.strokeStyle = '#FFFFFF';
+                  ctx.lineWidth = 3;
+                  ctx.stroke();
+
+                  // Center: locked color indicator (applies to freehand strokes)
                   ctx.beginPath();
                   ctx.arc(palmPos.x, palmPos.y, innerRadius - 2, 0, 2 * Math.PI);
                   ctx.fillStyle = freehandColorRef.current;
@@ -1736,7 +1744,17 @@ export default function HandTracker() {
                   ctx.lineWidth = 2;
                   ctx.stroke();
 
-                  // Left hand pinch: set color from hue (color selection only)
+                  // Hue label
+                  ctx.font = 'bold 12px sans-serif';
+                  ctx.fillStyle = '#000000';
+                  ctx.strokeStyle = '#FFFFFF';
+                  ctx.lineWidth = 3;
+                  ctx.textAlign = 'center';
+                  ctx.textBaseline = 'middle';
+                  ctx.strokeText(`${Math.round(hue)}°`, palmPos.x, palmPos.y);
+                  ctx.fillText(`${Math.round(hue)}°`, palmPos.x, palmPos.y);
+
+                  // Left hand pinch: lock color from hue (color selection only)
                   const leftPinch = gesture.pinches.find(
                     (p: { fingers: string[] }) => p.fingers.includes('thumb') && p.fingers.includes('index')
                   );
@@ -1750,10 +1768,27 @@ export default function HandTracker() {
                       ctx.strokeStyle = '#00FF00';
                       ctx.lineWidth = 5;
                       ctx.stroke();
+
+                      ctx.font = 'bold 14px sans-serif';
+                      ctx.fillStyle = '#00FF00';
+                      ctx.strokeStyle = '#000000';
+                      ctx.lineWidth = 3;
+                      ctx.strokeText('LOCKED', palmPos.x, palmPos.y + wheelRadius + 24);
+                      ctx.fillText('LOCKED', palmPos.x, palmPos.y + wheelRadius + 24);
                     }
                   } else {
                     prevLeftHandPinchRef.current = false;
                   }
+
+                  // Instruction text
+                  ctx.font = '11px sans-serif';
+                  ctx.fillStyle = '#FFFFFF';
+                  ctx.strokeStyle = '#000000';
+                  ctx.lineWidth = 2;
+                  ctx.strokeText('Rotate to pick hue', palmPos.x, palmPos.y - wheelRadius - 14);
+                  ctx.fillText('Rotate to pick hue', palmPos.x, palmPos.y - wheelRadius - 14);
+                  ctx.strokeText('Pinch to lock color', palmPos.x, palmPos.y + wheelRadius + 6);
+                  ctx.fillText('Pinch to lock color', palmPos.x, palmPos.y + wheelRadius + 6);
                 }
 
                 // Mode label
