@@ -1,24 +1,33 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { HandRotation } from '../utils/gestureDetection';
+import { isWebGPUSupported } from '../utils/webgpu';
 
 interface RotatingCubeProps {
   rotation: HandRotation | null;
   handedness?: string;
 }
 
+type RendererType = THREE.WebGLRenderer;
+
 export default function RotatingCube({ rotation, handedness = 'Right' }: RotatingCubeProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cubeRef = useRef<THREE.Mesh | null>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const rendererRef = useRef<RendererType | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const [rendererType, setRendererType] = useState<'webgpu' | 'webgl'>('webgl');
 
   useEffect(() => {
     if (!containerRef.current) return;
+
+    let renderer: RendererType;
+    let geometry: THREE.BoxGeometry;
+    let material: THREE.MeshPhongMaterial;
+    let cleanupFn: (() => void) | null = null;
 
     // Scene setup
     const scene = new THREE.Scene();
@@ -35,82 +44,109 @@ export default function RotatingCube({ rotation, handedness = 'Right' }: Rotatin
     camera.position.z = 5;
     cameraRef.current = camera;
 
-    // Renderer setup
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
-    containerRef.current.appendChild(renderer.domElement);
-    rendererRef.current = renderer;
+    // Initialize renderer with WebGPU support and fallback
+    const initRenderer = async () => {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b97d5d6-5ccc-426a-943a-e188f061295d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'RotatingCube.tsx:48',message:'Initializing renderer',data:{isWebGPUSupported:isWebGPUSupported()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+      
+      // Note: WebGPURenderer is not available in Three.js 0.182.0
+      // Using WebGLRenderer for Three.js, but custom WebGPU particle renderers are used for effects
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      setRendererType('webgl');
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b97d5d6-5ccc-426a-943a-e188f061295d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'RotatingCube.tsx:56',message:'Renderer created',data:{rendererType:'WebGLRenderer'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
 
-    // Create cube
-    const geometry = new THREE.BoxGeometry(2, 2, 2);
+      renderer.setSize(containerRef.current!.clientWidth, containerRef.current!.clientHeight);
+      containerRef.current!.appendChild(renderer.domElement);
+      rendererRef.current = renderer;
 
-    // Create gradient material with edges
-    const material = new THREE.MeshPhongMaterial({
-      color: handedness === 'Right' ? 0x00ff00 : 0xff0000,
-      emissive: handedness === 'Right' ? 0x003300 : 0x330000,
-      specular: 0x111111,
-      shininess: 30,
-      flatShading: false,
-    });
+      // Create cube
+      geometry = new THREE.BoxGeometry(2, 2, 2);
 
-    const cube = new THREE.Mesh(geometry, material);
-    scene.add(cube);
-    cubeRef.current = cube;
+      // Create gradient material with edges
+      material = new THREE.MeshPhongMaterial({
+        color: handedness === 'Right' ? 0x00ff00 : 0xff0000,
+        emissive: handedness === 'Right' ? 0x003300 : 0x330000,
+        specular: 0x111111,
+        shininess: 30,
+        flatShading: false,
+      });
 
-    // Add edges to make cube more visible
-    const edges = new THREE.EdgesGeometry(geometry);
-    const lineMaterial = new THREE.LineBasicMaterial({
-      color: 0xffffff,
-      linewidth: 2
-    });
-    const wireframe = new THREE.LineSegments(edges, lineMaterial);
-    cube.add(wireframe);
+      const cube = new THREE.Mesh(geometry, material);
+      scene.add(cube);
+      cubeRef.current = cube;
 
-    // Add lights
-    const ambientLight = new THREE.AmbientLight(0x404040, 2);
-    scene.add(ambientLight);
+      // Add edges to make cube more visible
+      const edges = new THREE.EdgesGeometry(geometry);
+      const lineMaterial = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        linewidth: 2
+      });
+      const wireframe = new THREE.LineSegments(edges, lineMaterial);
+      cube.add(wireframe);
 
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    directionalLight.position.set(5, 5, 5);
-    scene.add(directionalLight);
+      // Add lights
+      const ambientLight = new THREE.AmbientLight(0x404040, 2);
+      scene.add(ambientLight);
 
-    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
-    directionalLight2.position.set(-5, -5, -5);
-    scene.add(directionalLight2);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+      directionalLight.position.set(5, 5, 5);
+      scene.add(directionalLight);
 
-    // Animation loop
-    const animate = () => {
-      animationFrameRef.current = requestAnimationFrame(animate);
-      renderer.render(scene, camera);
+      const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
+      directionalLight2.position.set(-5, -5, -5);
+      scene.add(directionalLight2);
+
+      // Animation loop
+      const animate = () => {
+        animationFrameRef.current = requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+      };
+      animate();
+
+      // Handle resize
+      const handleResize = () => {
+        if (!containerRef.current || !camera || !renderer) return;
+
+        const width = containerRef.current.clientWidth;
+        const height = containerRef.current.clientHeight;
+
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+        renderer.setSize(width, height);
+      };
+
+      window.addEventListener('resize', handleResize);
+
+      // Return cleanup function
+      cleanupFn = () => {
+        window.removeEventListener('resize', handleResize);
+        if (animationFrameRef.current) {
+          cancelAnimationFrame(animationFrameRef.current);
+        }
+        if (containerRef.current && renderer.domElement) {
+          try {
+            containerRef.current.removeChild(renderer.domElement);
+          } catch (e) {
+            // Element may already be removed
+          }
+        }
+        renderer.dispose();
+        if (geometry) geometry.dispose();
+        if (material) material.dispose();
+      };
     };
-    animate();
 
-    // Handle resize
-    const handleResize = () => {
-      if (!containerRef.current || !camera || !renderer) return;
+    initRenderer();
 
-      const width = containerRef.current.clientWidth;
-      const height = containerRef.current.clientHeight;
-
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-      renderer.setSize(width, height);
-    };
-
-    window.addEventListener('resize', handleResize);
-
-    // Cleanup
+    // Cleanup on unmount
     return () => {
-      window.removeEventListener('resize', handleResize);
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
+      if (cleanupFn) {
+        cleanupFn();
       }
-      if (containerRef.current && renderer.domElement) {
-        containerRef.current.removeChild(renderer.domElement);
-      }
-      renderer.dispose();
-      geometry.dispose();
-      material.dispose();
     };
   }, [handedness]);
 

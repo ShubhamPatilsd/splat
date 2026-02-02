@@ -10,6 +10,8 @@ import {
   Landmark,
   normalizeToScreen,
 } from '../utils/gestureDetection';
+import { isWebGPUSupported, initWebGPUDevice } from '../utils/webgpu';
+import { createParticleRenderer, Particle } from '../utils/webgpuParticles';
 
 // TypeScript declarations for MediaPipe libraries
 declare global {
@@ -192,6 +194,11 @@ export default function HandTracker() {
   const fireAnimationRef = useRef<number | null>(null);
   const burnGlowAnimationRef = useRef<number | null>(null);
   const steamAnimationRef = useRef<number | null>(null);
+  // WebGPU particle renderers
+  const waterRendererRef = useRef<Awaited<ReturnType<typeof createParticleRenderer>> | null>(null);
+  const fireRendererRef = useRef<Awaited<ReturnType<typeof createParticleRenderer>> | null>(null);
+  const steamRendererRef = useRef<Awaited<ReturnType<typeof createParticleRenderer>> | null>(null);
+  const burnGlowRendererRef = useRef<Awaited<ReturnType<typeof createParticleRenderer>> | null>(null);
   const burnGlowRef = useRef<Map<Matter.Body, { timestamp: number; level: number }>>(new Map());
   // Surface flames - flames that appear on burning box surfaces
   const surfaceFlamesRef = useRef<Array<{
@@ -376,7 +383,7 @@ export default function HandTracker() {
   };
 
   // Initialize Three.js for 3D models
-  const initializeThreeJS = () => {
+  const initializeThreeJS = async () => {
     const canvas = threejsCanvasRef.current;
     if (!canvas) return;
 
@@ -389,12 +396,25 @@ export default function HandTracker() {
     camera.position.z = 500;
     threeCameraRef.current = camera;
 
-    // Create renderer
-    const renderer = new THREE.WebGLRenderer({
+    // Create renderer (WebGLRenderer - WebGPURenderer not available in Three.js 0.182.0)
+    let renderer: THREE.WebGLRenderer;
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7b97d5d6-5ccc-426a-943a-e188f061295d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HandTracker.tsx:402',message:'Checking WebGPU support for Three.js renderer',data:{isWebGPUSupported:isWebGPUSupported()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
+    // Note: WebGPURenderer is not available in Three.js 0.182.0
+    // Using WebGLRenderer for Three.js, but custom WebGPU particle renderers are used for effects
+    renderer = new THREE.WebGLRenderer({
       canvas,
       alpha: true,
       antialias: true,
     });
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7b97d5d6-5ccc-426a-943a-e188f061295d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HandTracker.tsx:427',message:'Renderer created',data:{rendererType:'WebGLRenderer'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    
     renderer.setSize(1280, 720);
     renderer.setClearColor(0x000000, 0);
     threeRendererRef.current = renderer;
@@ -954,8 +974,27 @@ export default function HandTracker() {
     const waterCanvas = waterCanvasRef.current;
     if (!waterCanvas) return;
 
+    // Try WebGPU renderer first
+    const webgpuRenderer = waterRendererRef.current;
+    if (webgpuRenderer && webgpuRenderer.isWebGPU) {
+      const particles: Particle[] = waterParticlesRef.current.map(particle => ({
+        x: particle.position.x,
+        y: particle.position.y,
+        radius: WATER_PARTICLE_RADIUS * 1.8,
+        color: WATER_COLOR,
+        opacity: 0.6,
+      }));
+      webgpuRenderer.render(particles);
+      waterAnimationRef.current = requestAnimationFrame(renderWater);
+      return;
+    }
+
+    // Fallback to 2D canvas
     const ctx = waterCanvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      waterAnimationRef.current = requestAnimationFrame(renderWater);
+      return;
+    }
 
     // Clear canvas
     ctx.clearRect(0, 0, waterCanvas.width, waterCanvas.height);
@@ -981,13 +1020,80 @@ export default function HandTracker() {
     const fireCanvas = fireCanvasRef.current;
     if (!fireCanvas) return;
 
+    const now = Date.now();
+
+    // Try WebGPU renderer first
+    const webgpuRenderer = fireRendererRef.current;
+    if (webgpuRenderer && webgpuRenderer.isWebGPU) {
+      const particles: Particle[] = [];
+      
+      // Sort particles by age (oldest/coolest first, newest/hottest on top)
+      const sortedParticles = [...fireParticlesRef.current].sort((a, b) => {
+        const ageA = now - a.createdAt;
+        const ageB = now - b.createdAt;
+        return ageB - ageA;
+      });
+
+      for (const fireParticle of sortedParticles) {
+        const { x, y } = fireParticle.body.position;
+        const age = now - fireParticle.createdAt;
+        const normalizedAge = Math.min(age / FIRE_LIFETIME, 1);
+        const intensity = (fireParticle as any).intensity || 1;
+        const sizeMultiplier = 1.8 - normalizedAge * 0.8;
+        const baseRadius = FIRE_PARTICLE_RADIUS * sizeMultiplier;
+        const flicker = 0.85 + Math.sin(now * 0.02 + x * 0.1) * 0.15;
+        const radius = baseRadius * flicker;
+        const color = getFireColor(normalizedAge, intensity);
+
+        particles.push({
+          x,
+          y,
+          radius,
+          color,
+          opacity: 1.0,
+          age: normalizedAge,
+          lifetime: 1.0,
+          intensity,
+        });
+      }
+
+      // Add surface flames
+      for (const flame of surfaceFlamesRef.current) {
+        const age = now - flame.createdAt;
+        const normalizedAge = age / SURFACE_FLAME_LIFETIME;
+        const flicker = 0.75 + Math.sin(now * 0.03 + flame.x * 0.2) * 0.25;
+        const sizeMultiplier = (1.4 - normalizedAge * 0.5) * flicker;
+        const radius = SURFACE_FLAME_RADIUS * sizeMultiplier;
+        const alpha = (1 - normalizedAge * 0.8) * flame.intensity;
+        const heat = (1 - normalizedAge) * flame.intensity;
+        const color = heat > 0.5 
+          ? `rgba(255, 230, 120, ${alpha})`
+          : `rgba(255, 100, 30, ${alpha})`;
+
+        particles.push({
+          x: flame.x,
+          y: flame.y,
+          radius,
+          color,
+          opacity: alpha,
+          intensity: flame.intensity,
+        });
+      }
+
+      webgpuRenderer.render(particles);
+      fireAnimationRef.current = requestAnimationFrame(renderFire);
+      return;
+    }
+
+    // Fallback to 2D canvas
     const ctx = fireCanvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      fireAnimationRef.current = requestAnimationFrame(renderFire);
+      return;
+    }
 
     // Clear canvas
     ctx.clearRect(0, 0, fireCanvas.width, fireCanvas.height);
-
-    const now = Date.now();
 
     // Sort particles by age (oldest/coolest first, newest/hottest on top)
     const sortedParticles = [...fireParticlesRef.current].sort((a, b) => {
@@ -1129,6 +1235,38 @@ export default function HandTracker() {
       return;
     }
 
+    const now = Date.now();
+
+    // Try WebGPU renderer (steam uses fire canvas, so check fire renderer)
+    const webgpuRenderer = fireRendererRef.current;
+    if (webgpuRenderer && webgpuRenderer.isWebGPU) {
+      const particles: Particle[] = steamParticlesRef.current.map(steamParticle => {
+        const { x, y } = steamParticle.body.position;
+        const age = now - steamParticle.createdAt;
+        const normalizedAge = Math.min(age / STEAM_LIFETIME, 1);
+        const sizeMultiplier = 1.2 + normalizedAge * 1.5;
+        const radius = STEAM_PARTICLE_RADIUS * sizeMultiplier;
+        const baseOpacity = 0.6 * (1 - normalizedAge);
+        const pulse = 0.9 + Math.sin(now * 0.005 + x * 0.05) * 0.1;
+        const opacity = baseOpacity * pulse;
+
+        return {
+          x,
+          y,
+          radius,
+          color: 'rgba(255, 255, 255, 1)',
+          opacity,
+          age: normalizedAge,
+          lifetime: 1.0,
+        };
+      });
+
+      // Note: Steam is drawn on top of fire, so we need to render it separately
+      // For now, we'll use 2D canvas for steam when WebGPU is used for fire
+      // This is a limitation we can improve later
+    }
+
+    // Fallback to 2D canvas
     const ctx = fireCanvas.getContext('2d');
     if (!ctx) {
       steamAnimationRef.current = requestAnimationFrame(renderSteam);
@@ -1137,8 +1275,6 @@ export default function HandTracker() {
 
     // Don't clear - steam is drawn on top of fire in same canvas
     // The fire render loop clears, and steam draws after
-
-    const now = Date.now();
 
     // Draw steam particles with wispy, fading appearance
     for (const steamParticle of steamParticlesRef.current) {
@@ -1179,12 +1315,52 @@ export default function HandTracker() {
     const burnCanvas = burnGlowCanvasRef.current;
     if (!burnCanvas) return;
 
+    const now = Date.now();
+
+    // Try WebGPU renderer first
+    const webgpuRenderer = burnGlowRendererRef.current;
+    if (webgpuRenderer && webgpuRenderer.isWebGPU) {
+      const particles: Particle[] = [];
+      
+      for (const [box, info] of burnGlowRef.current.entries()) {
+        if (!boxesRef.current.includes(box)) {
+          burnGlowRef.current.delete(box);
+          continue;
+        }
+
+        const age = now - info.timestamp;
+        if (age > BURN_GLOW_LIFETIME) {
+          burnGlowRef.current.delete(box);
+          continue;
+        }
+
+        const width = box.bounds.max.x - box.bounds.min.x;
+        const height = box.bounds.max.y - box.bounds.min.y;
+        const radius = Math.max(width, height) * 0.7;
+        const alpha = (1 - age / BURN_GLOW_LIFETIME) * (0.35 + info.level * 0.6);
+
+        particles.push({
+          x: box.position.x,
+          y: box.position.y,
+          radius,
+          color: `rgba(255, 140, 60, ${alpha})`,
+          opacity: alpha,
+        });
+      }
+
+      webgpuRenderer.render(particles);
+      burnGlowAnimationRef.current = requestAnimationFrame(renderBurnGlow);
+      return;
+    }
+
+    // Fallback to 2D canvas
     const ctx = burnCanvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      burnGlowAnimationRef.current = requestAnimationFrame(renderBurnGlow);
+      return;
+    }
 
     ctx.clearRect(0, 0, burnCanvas.width, burnCanvas.height);
-
-    const now = Date.now();
     for (const [box, info] of burnGlowRef.current.entries()) {
       if (!boxesRef.current.includes(box)) {
         burnGlowRef.current.delete(box);
@@ -2113,6 +2289,24 @@ export default function HandTracker() {
 
         // Initialize Three.js for 3D models
         initializeThreeJS();
+
+        // Initialize WebGPU particle renderers
+        if (waterCanvasRef.current) {
+          createParticleRenderer(waterCanvasRef.current, 'water').then(renderer => {
+            waterRendererRef.current = renderer;
+          }).catch(err => console.warn('Failed to create WebGPU water renderer:', err));
+        }
+        if (fireCanvasRef.current) {
+          createParticleRenderer(fireCanvasRef.current, 'fire').then(renderer => {
+            fireRendererRef.current = renderer;
+          }).catch(err => console.warn('Failed to create WebGPU fire renderer:', err));
+        }
+        if (burnGlowCanvasRef.current) {
+          createParticleRenderer(burnGlowCanvasRef.current, 'burnGlow').then(renderer => {
+            burnGlowRendererRef.current = renderer;
+          }).catch(err => console.warn('Failed to create WebGPU burnGlow renderer:', err));
+        }
+        // Steam uses fire canvas, so we'll handle it separately
 
         // Start water rendering loop
         renderWater();
