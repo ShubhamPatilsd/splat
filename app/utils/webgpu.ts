@@ -3,70 +3,6 @@
  * Provides fallback to WebGL when WebGPU is not available
  */
 
-// WebGPU type declarations (for browsers that support it)
-declare global {
-  interface Navigator {
-    gpu?: GPU;
-  }
-
-  interface GPU {
-    requestAdapter(options?: GPURequestAdapterOptions): Promise<GPUAdapter | null>;
-    getPreferredCanvasFormat(): GPUTextureFormat;
-  }
-
-  interface GPURequestAdapterOptions {
-    powerPreference?: 'low-power' | 'high-performance';
-    forceFallbackAdapter?: boolean;
-  }
-
-  interface GPUAdapter {
-    requestDevice(descriptor?: GPUDeviceDescriptor): Promise<GPUDevice>;
-    requestAdapterInfo(): Promise<GPUAdapterInfo>;
-  }
-
-  interface GPUDeviceDescriptor {
-    requiredFeatures?: GPUFeatureName[];
-    requiredLimits?: Record<string, number>;
-  }
-
-  interface GPUDevice {
-    addEventListener(type: 'uncapturederror', listener: (event: GPUUncapturedErrorEvent) => void): void;
-  }
-
-  interface GPUUncapturedErrorEvent {
-    error: GPUError;
-  }
-
-  interface GPUError {
-    readonly message: string;
-  }
-
-  interface GPUAdapterInfo {
-    vendor: string;
-    architecture: string;
-    device: string;
-    description: string;
-  }
-
-  interface GPUCanvasContext {
-    configure(configuration: GPUCanvasConfiguration): void;
-  }
-
-  interface GPUCanvasConfiguration {
-    device: GPUDevice;
-    format: GPUTextureFormat;
-    usage?: number;
-    alphaMode?: 'opaque' | 'premultiplied';
-  }
-
-  type GPUTextureFormat = string;
-  type GPUFeatureName = string;
-
-  enum GPUTextureUsage {
-    RENDER_ATTACHMENT = 0x10,
-  }
-}
-
 export interface WebGPUDeviceInfo {
   device: GPUDevice | null;
   adapter: GPUAdapter | null;
@@ -135,32 +71,6 @@ export async function initWebGPUDevice(): Promise<WebGPUDeviceInfo> {
     result.error = error instanceof Error ? error.message : 'Unknown error initializing WebGPU';
     console.warn('WebGPU initialization failed:', result.error);
     return result;
-  }
-}
-
-/**
- * Get WebGPU adapter info for debugging
- */
-export async function getWebGPUAdapterInfo(): Promise<GPUAdapterInfo | null> {
-  if (!isWebGPUSupported()) {
-    return null;
-  }
-
-  try {
-    const gpu = navigator.gpu;
-    if (!gpu) {
-      return null;
-    }
-    const adapter = await gpu.requestAdapter();
-    if (!adapter) {
-      return null;
-    }
-
-    const info = await adapter.requestAdapterInfo();
-    return info;
-  } catch (error) {
-    console.warn('Failed to get WebGPU adapter info:', error);
-    return null;
   }
 }
 

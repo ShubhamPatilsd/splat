@@ -397,23 +397,12 @@ export default function HandTracker() {
     threeCameraRef.current = camera;
 
     // Create renderer (WebGLRenderer - WebGPURenderer not available in Three.js 0.182.0)
-    let renderer: THREE.WebGLRenderer;
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7b97d5d6-5ccc-426a-943a-e188f061295d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HandTracker.tsx:402',message:'Checking WebGPU support for Three.js renderer',data:{isWebGPUSupported:isWebGPUSupported()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    
-    // Note: WebGPURenderer is not available in Three.js 0.182.0
-    // Using WebGLRenderer for Three.js, but custom WebGPU particle renderers are used for effects
-    renderer = new THREE.WebGLRenderer({
+    // Note: Using WebGLRenderer for Three.js, but custom WebGPU particle renderers are used for effects
+    const renderer = new THREE.WebGLRenderer({
       canvas,
       alpha: true,
       antialias: true,
     });
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7b97d5d6-5ccc-426a-943a-e188f061295d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HandTracker.tsx:427',message:'Renderer created',data:{rendererType:'WebGLRenderer'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     
     renderer.setSize(1280, 720);
     renderer.setClearColor(0x000000, 0);

@@ -79,7 +79,7 @@ async function createWebGPUParticleRenderer(
     code: shaderCode,
   });
 
-  // Create render pipeline
+  // Create render pipeline with instancing
   const pipeline = device.createRenderPipeline({
     label: `${effectType} particle pipeline`,
     layout: 'auto',
@@ -89,6 +89,7 @@ async function createWebGPUParticleRenderer(
       buffers: [
         {
           arrayStride: 8 * 4, // x, y, radius, color_r, color_g, color_b, opacity, intensity
+          stepMode: 'instance', // One entry per particle instance
           attributes: [
             { shaderLocation: 0, offset: 0, format: 'float32x2' }, // position
             { shaderLocation: 1, offset: 8, format: 'float32' }, // radius
@@ -127,6 +128,14 @@ async function createWebGPUParticleRenderer(
     ],
   });
 
+  // Create reusable vertex buffer with max size
+  const maxParticles = effectType === 'fire' ? 320 : 500;
+  const maxVertexBufferSize = maxParticles * 8 * 4; // 8 floats per particle, 4 bytes per float
+  let vertexBuffer = device.createBuffer({
+    size: maxVertexBufferSize,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+
   return {
     render: (particles: Particle[]) => {
       if (particles.length === 0) return;
@@ -141,7 +150,7 @@ async function createWebGPUParticleRenderer(
       ]);
       device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
-      // Create vertex buffer from particles
+      // Update vertex buffer from particles (reuse existing buffer)
       const vertexData = new Float32Array(particles.length * 8);
       let offset = 0;
       for (const particle of particles) {
@@ -156,10 +165,7 @@ async function createWebGPUParticleRenderer(
         vertexData[offset++] = particle.intensity || 1.0;
       }
 
-      const vertexBuffer = device.createBuffer({
-        size: vertexData.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      });
+      // Write to existing buffer instead of creating new one
       device.queue.writeBuffer(vertexBuffer, 0, vertexData);
 
       // Create command encoder
@@ -178,14 +184,14 @@ async function createWebGPUParticleRenderer(
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, bindGroup);
       pass.setVertexBuffer(0, vertexBuffer);
-      pass.draw(particles.length * 6, 1); // 6 vertices per particle (quad)
+      pass.draw(6, particles.length); // Draw 6 vertices (quad) per particle instance
       pass.end();
 
       device.queue.submit([encoder.finish()]);
-      vertexBuffer.destroy();
     },
     dispose: () => {
       uniformBuffer.destroy();
+      vertexBuffer.destroy();
     },
     isWebGPU: true,
   };
@@ -287,10 +293,14 @@ function getShaderCode(effectType: 'water' | 'fire' | 'steam' | 'burnGlow'): str
 
   const vertexShader = `
     @vertex
-    fn vs_main(input: VertexInput) -> VertexOutput {
+    fn vs_main(
+      @builtin(vertex_index) vertexIndex: u32,
+      @builtin(instance_index) instanceIndex: u32,
+      input: VertexInput
+    ) -> VertexOutput {
       var output: VertexOutput;
-      
-      // Create quad vertices
+
+      // Create quad vertices (2 triangles forming a quad)
       let quadPositions = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
         vec2<f32>(1.0, -1.0),
@@ -299,7 +309,7 @@ function getShaderCode(effectType: 'water' | 'fire' | 'steam' | 'burnGlow'): str
         vec2<f32>(1.0, -1.0),
         vec2<f32>(1.0, 1.0)
       );
-      
+
       let quadUVs = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 1.0),
         vec2<f32>(1.0, 1.0),
@@ -308,21 +318,21 @@ function getShaderCode(effectType: 'water' | 'fire' | 'steam' | 'burnGlow'): str
         vec2<f32>(1.0, 1.0),
         vec2<f32>(1.0, 0.0)
       );
-      
-      let vertexIndex = i32(input.position.x); // Reuse position.x as vertex index
+
+      // Use vertex index to get quad corner position
       let pos = quadPositions[vertexIndex] * input.radius;
       let screenPos = vec2<f32>(
         (input.position.x / uniforms.canvasWidth) * 2.0 - 1.0,
         1.0 - (input.position.y / uniforms.canvasHeight) * 2.0
       );
-      
+
       output.position = vec4<f32>(screenPos + pos / vec2<f32>(uniforms.canvasWidth, uniforms.canvasHeight) * 2.0, 0.0, 1.0);
       output.uv = quadUVs[vertexIndex];
       output.color = input.color;
       output.opacity = input.opacity;
       output.intensity = input.intensity;
       output.radius = input.radius;
-      
+
       return output;
     }
   `;
