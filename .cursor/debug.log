@@ -1,4 +1,0 @@
-{"location":"HandTracker.tsx:402","message":"Checking WebGPU support for Three.js renderer","data":{"isWebGPUSupported":true},"timestamp":1770068417558,"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}
-{"location":"HandTracker.tsx:427","message":"Renderer created","data":{"rendererType":"WebGLRenderer"},"timestamp":1770068417566,"sessionId":"debug-session","runId":"run1","hypothesisId":"B"}
-{"location":"HandTracker.tsx:402","message":"Checking WebGPU support for Three.js renderer","data":{"isWebGPUSupported":true},"timestamp":1770068554292,"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}
-{"location":"HandTracker.tsx:427","message":"Renderer created","data":{"rendererType":"WebGLRenderer"},"timestamp":1770068554451,"sessionId":"debug-session","runId":"run1","hypothesisId":"B"}
